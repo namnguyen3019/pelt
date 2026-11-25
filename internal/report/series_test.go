@@ -158,3 +158,91 @@ func TestFlowSeries(t *testing.T) {
 		t.Errorf("flow timeline header missing\n%s", text.String())
 	}
 }
+
+// tailResult is a run timed a few ms past a whole second, as a run is
+// when it waits for its last requests: secs whole seconds of 100 requests
+// each, then a tail of tailMS in which another 100 finished. The tail
+// requests are the four latency samples, so the last row's p95 covers them.
+func tailResult(secs int, tailMS int) (*Report, *bytes.Buffer) {
+	cfg, res := sampleResult()
+	res.Elapsed = time.Duration(secs)*time.Second + time.Duration(tailMS)*time.Millisecond
+	at := uint32(secs*1000 + tailMS/2)
+	res.Finish = []uint32{at, at, at, at}
+	counts := make([]series.Count, secs+1)
+	for i := range counts {
+		counts[i] = series.Count{Requests: 100, Responses: 100, S2xx: 100}
+	}
+	res.Series = series.Raw{Elapsed: res.Elapsed, Counts: counts}
+	return New(cfg, res), &bytes.Buffer{}
+}
+
+// timelineLines returns the Timeline's data rows, without its header.
+func timelineLines(t *testing.T, out string) []string {
+	t.Helper()
+	_, after, ok := strings.Cut(out, "Timeline (")
+	if !ok {
+		t.Fatalf("no Timeline\n%s", out)
+	}
+	block, _, _ := strings.Cut(after, "\n\n")
+	lines := strings.Split(block, "\n")
+	return lines[2:] // skip "N second(s) per row):" and the column header
+}
+
+func TestTimelineFoldsShortTail(t *testing.T) {
+	// 3.004s: the 4 ms tail joins the 2-3s row instead of being a row of
+	// its own at 100 / 0.004 = 25,000 req/s.
+	rep, buf := tailResult(3, 4)
+	rep.WriteText(buf)
+	out := buf.String()
+	rows := timelineLines(t, out)
+	if len(rows) != 3 {
+		t.Fatalf("Timeline has %d rows, want 3:\n%s", len(rows), out)
+	}
+	last := strings.Fields(rows[2])
+	// 200 requests in 1.004s is 199/s; p95 comes from the tail's samples.
+	if last[0] != "2-3s" || last[1] != "199" || last[2] != "4.000" {
+		t.Errorf("last row = %q, want 2-3s at 199 req/s with p95 4.000", rows[2])
+	}
+	if strings.Contains(out, "25,000") || strings.Contains(out, "3-4s") {
+		t.Errorf("tail shown as its own row:\n%s", out)
+	}
+
+	// The JSON series and CSV still keep one row per second.
+	var js bytes.Buffer
+	rep.WriteJSON(&js)
+	var j struct {
+		Series []map[string]any `json:"series"`
+	}
+	json.Unmarshal(js.Bytes(), &j)
+	if len(j.Series) != 4 {
+		t.Errorf("JSON series has %d rows, want 4", len(j.Series))
+	}
+}
+
+func TestTimelineTailRows(t *testing.T) {
+	// A 20.003s run fits 20 rows of 1 second; without the fold its 21
+	// seconds would make 2 seconds per row.
+	rep, buf := tailResult(20, 3)
+	rep.WriteText(buf)
+	if !strings.Contains(buf.String(), "Timeline (1 second per row):") {
+		t.Errorf("want 1 second per row:\n%s", buf.String())
+	}
+	if rows := timelineLines(t, buf.String()); len(rows) != 20 {
+		t.Errorf("Timeline has %d rows, want 20", len(rows))
+	}
+
+	// A tail of half a second or more is a row of its own.
+	rep, buf = tailResult(3, 500)
+	rep.WriteText(buf)
+	rows := timelineLines(t, buf.String())
+	if len(rows) != 4 || !strings.HasPrefix(strings.TrimSpace(rows[3]), "3-4s") {
+		t.Errorf("want a 3-4s row for a 500 ms tail:\n%s", buf.String())
+	}
+
+	// 2.004s is a two-second run: still too short for a Timeline.
+	rep, buf = tailResult(2, 4)
+	rep.WriteText(buf)
+	if strings.Contains(buf.String(), "Timeline") {
+		t.Errorf("a 2.004s run printed a Timeline:\n%s", buf.String())
+	}
+}

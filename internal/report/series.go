@@ -29,16 +29,36 @@ type timeline struct {
 	plan  *stages.Plan // nil without stages
 }
 
+// shortTail is the most of a last second the run may cover for the
+// Timeline to fold that second into the row before it. A run is timed
+// until its last request or iteration ends, so a 20s run lasts a little
+// longer, such as 20.003s. Shown as its own row, those 3 ms would divide
+// the requests and iterations that ended at the deadline by 0.003s and
+// print rates thousands of times too high.
+const shortTail = 0.5
+
 // newTimeline adds up s into at most timelineRows spans. It needs the
 // grouped latencies, so it runs before s.Release.
 func newTimeline(s *series.Series, plan *stages.Plan) timeline {
-	if len(s.Rows) < timelineMinSeconds {
+	n := len(s.Rows)
+	// The seconds the Timeline shows: a short tail joins the last row.
+	shown := n
+	if n > 1 && s.Rows[n-1].Seconds < shortTail {
+		shown = n - 1
+	}
+	if shown < timelineMinSeconds {
 		return timeline{}
 	}
-	width, bounds := series.Slices(len(s.Rows), timelineRows)
+	width, bounds := series.Slices(shown, timelineRows)
 	tl := timeline{width: width, plan: plan}
-	for _, b := range bounds {
-		tl.spans = append(tl.spans, s.Range(b[0], b[1]))
+	for i, b := range bounds {
+		to := b[1]
+		if i == len(bounds)-1 {
+			to = n // take in the tail's counts, its time and its latencies
+		}
+		sp := s.Range(b[0], to)
+		sp.To = b[1] // but label the row by whole seconds
+		tl.spans = append(tl.spans, sp)
 	}
 	return tl
 }
