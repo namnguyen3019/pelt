@@ -16,7 +16,7 @@ the release's `checksums.txt`, and installs `pelt` to `/usr/local/bin` (using
 
 ```sh
 # a specific version
-curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | sh -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | sh -s -- v0.4.1
 
 # somewhere you own, no sudo
 curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
@@ -35,16 +35,31 @@ It downloads `pelt_windows_<arch>.zip`, checks its SHA-256 against
 that folder to your user PATH, so no admin rights are needed. `pelt` works
 right away in that window; other open terminals need restarting.
 
-To pick a version or folder, set `PELT_VERSION` (e.g. `v0.1.0`) or
+To pick a version or folder, set `PELT_VERSION` (e.g. `v0.4.1`) or
 `PELT_INSTALL_DIR` first, or set `PELT_NO_MODIFY_PATH=1` to leave PATH alone:
 
 ```powershell
-$env:PELT_VERSION = 'v0.1.0'; irm https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.ps1 | iex
+$env:PELT_VERSION = 'v0.4.1'; irm https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.ps1 | iex
 ```
+
+## Versions
+
+The installers and `go install ...@latest` take the latest release. What each
+release added:
+
+| Version | Adds |
+|---------|------|
+| v0.4.1 | Same features as v0.4.0, with prebuilt binaries (fixes the release build and a flaky test). Use this rather than v0.4.0. |
+| v0.4.0 | Flow thresholds, [load stages](usage.md#load-stages) (`-stages`, `-ramp`) in both modes, and [per-second results](usage.md#per-second-results) (Timeline, JSON `series`, `-series` CSV). Has no prebuilt binaries, so the installers cannot fetch it. |
+| v0.3.0 | [Thresholds](usage.md#thresholds) and exit code 3 in single-URL mode |
+| v0.2.0 | [Flow mode](flows.md): `pelt run` |
+| v0.1.0 | Single-URL mode |
+
+To check what you have, run `pelt -h`: v0.4.0 and later list `-stages`.
 
 ## Prebuilt binary
 
-Every [release](https://github.com/namnguyen3019/pelt/releases) has
+Every [release](https://github.com/namnguyen3019/pelt/releases) except v0.4.0 has
 `pelt_<os>_<arch>.tar.gz` for `linux` and `darwin` (`amd64`, `arm64`),
 `pelt_windows_<arch>.zip` for Windows, and a `checksums.txt`. For example:
 
@@ -86,6 +101,6 @@ tests, builds all six targets and publishes a GitHub Release with the archives
 and `checksums.txt`:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.5.0
+git push origin v0.5.0
 ```

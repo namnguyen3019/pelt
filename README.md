@@ -5,9 +5,11 @@ library only.
 
 - **Fast:** about 54,600 req/s from one process on a 4-vCPU machine.
 - **Clear results:** latency percentiles (p50 to p99), a histogram, status
-  codes, errors by kind, and TCP connections opened vs reused.
+  codes, errors by kind, TCP connections opened vs reused, and a per-second
+  Timeline (also as JSON or CSV) that shows when things went wrong.
 - **Flexible runs:** fixed count (`-n`), duration (`-d`), concurrency (`-c`)
-  and a rate cap (`-rate`); any method, headers and body; HTTP/2 with `-http2`.
+  and a rate cap (`-rate`); load stages that ramp up, hold and ramp down
+  (`-stages`, `-ramp`); any method, headers and body; HTTP/2 with `-http2`.
 - **CI ready:** pass/fail thresholds such as `-threshold 'p95<300ms'` fail
   the job with exit code 3; JSON output (`-o json`); Ctrl-C still prints a
   report.
@@ -40,7 +42,7 @@ Versions, prebuilt binaries and building from source: [docs/install.md](docs/ins
 $ pelt -n 50000 -c 1000 http://127.0.0.1:8080/
 Requests:     50000 completed, 50000 responses, 0 errors (0.00%)
 Throughput:   54598.3 requests/sec, 3.3 MiB/sec read
-Connections:  632 opened, 49368 reused
+Connections:  632 opened, 49368 requests reused a connection
 
 Latency (successful requests):
   p50     12.215 ms
@@ -59,6 +61,9 @@ exits 3 if any is missed:
 pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
 ```
 
+Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
+files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
+
 To see where a service starts to struggle, ramp the load up and down. Each
 second's rate, latency and errors land in a Timeline, in JSON and, with
 `-series out.csv`, in a CSV file:
@@ -69,9 +74,6 @@ pelt -stages 30s:200,2m:200,30s:0 -series out.csv https://staging.example.com/
 
 More: [load stages](docs/usage.md#load-stages) and
 [per-second results](docs/usage.md#per-second-results).
-
-Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
-files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
 
 For multi-step journeys, describe them in a JSON file and run it:
 
