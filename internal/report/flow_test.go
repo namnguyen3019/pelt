@@ -102,3 +102,31 @@ func TestFlowJSON(t *testing.T) {
 		t.Errorf("steps = %+v", got.Steps)
 	}
 }
+
+func TestFlowNoIterationCompletedFails(t *testing.T) {
+	res := sampleFlowResult(t)
+	if v := NewFlow(sampleFlowResult(t)).Verdict(); !v.Passed() {
+		t.Fatalf("sample run with completed iterations failed: %+v", v)
+	}
+	res.Flows[0].Completed = 0
+	res.Flows[0].Cut = 3
+	rep := NewFlow(res)
+	if v := rep.Verdict(); v.Passed() || v.Reason != "no iteration completed" {
+		t.Fatalf("verdict %+v, want a failure", v)
+	}
+	var buf bytes.Buffer
+	rep.WriteText(&buf)
+	if !strings.Contains(buf.String(), "Result: FAIL (no iteration completed)") {
+		t.Errorf("missing FAIL line:\n%s", buf.String())
+	}
+	buf.Reset()
+	rep.WriteJSON(&buf)
+	var got struct {
+		Passed     bool   `json:"passed"`
+		FailReason string `json:"fail_reason"`
+	}
+	json.Unmarshal(buf.Bytes(), &got)
+	if got.Passed || got.FailReason != "no iteration completed" {
+		t.Errorf("JSON passed=%v reason=%q", got.Passed, got.FailReason)
+	}
+}

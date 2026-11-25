@@ -12,6 +12,7 @@ import (
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/stats"
+	"github.com/namnguyen3019/pelt/internal/threshold"
 )
 
 // histogramBuckets is how many bars the text histogram shows.
@@ -23,18 +24,66 @@ type Report struct {
 	res     *loadtest.Result
 	latency stats.Summary
 	hist    []stats.Bucket
+	verdict Verdict
 }
 
 // New computes statistics for res. It takes ownership of res.Latencies
 // (the slice gets sorted in place).
 func New(cfg loadtest.Config, res *loadtest.Result) *Report {
-	return &Report{
+	r := &Report{
 		cfg: cfg,
 		res: res,
 		// Histogram first: it does not need sorted input, Summarize sorts.
 		hist:    stats.Histogram(res.Latencies, histogramBuckets),
 		latency: stats.Summarize(res.Latencies, stats.DefaultPercentiles),
 	}
+	r.Check(nil)
+	return r
+}
+
+// Check evaluates thresholds against the run, keeps the verdict for the
+// text and JSON output, and returns it. Thresholds must be run-wide and not
+// flow-only; the caller validates that when parsing flags.
+//
+// With no thresholds the verdict still fails a run in which no request got
+// a response.
+func (r *Report) Check(ts []threshold.Threshold) Verdict {
+	res := r.res
+	outcomes := make([]threshold.Outcome, 0, len(ts))
+	for _, t := range ts {
+		outcomes = append(outcomes, threshold.Check(t, r.measure(t)))
+	}
+	reason := ""
+	if res.Successes == 0 {
+		reason = "no request got a response"
+	}
+	r.verdict = newVerdict(outcomes, reason)
+	return r.verdict
+}
+
+// Verdict returns the result of the last Check.
+func (r *Report) Verdict() Verdict { return r.verdict }
+
+// measure looks up a threshold's metric in the run. res.Latencies is
+// sorted by the time it is called, because New ran stats.Summarize.
+func (r *Report) measure(t threshold.Threshold) threshold.Measured {
+	res := r.res
+	switch {
+	case t.Kind == threshold.Latency:
+		return latency(t, res.Latencies, r.latency)
+	case t.Metric == "errors":
+		return rate(t, res.ErrorCount(), res.Total)
+	case t.StatusLow > 0:
+		return rate(t, statusCount(res.StatusCodes, t.StatusLow, t.StatusHigh), res.Total)
+	case t.Metric == "rps":
+		if res.Total == 0 {
+			return threshold.Measured{NoSamples: true}
+		}
+		return threshold.Measured{Value: res.RequestsPerSecond()}
+	case t.Metric == "requests":
+		return threshold.Measured{Value: float64(res.Total)}
+	}
+	return threshold.Measured{NoSamples: true} // flow-only metric
 }
 
 // WriteText prints the report in a format meant for a terminal.
@@ -98,6 +147,8 @@ func (r *Report) WriteText(w io.Writer) error {
 			fmt.Fprintf(&b, "  %6d  %s\n", res.Errors[k], k)
 		}
 	}
+
+	writeVerdict(&b, r.verdict)
 
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -171,26 +222,29 @@ func humanBytes(n float64) string {
 // what most dashboards and scripts expect.
 
 type jsonReport struct {
-	Target         string         `json:"target"`
-	Method         string         `json:"method"`
-	Concurrency    int            `json:"concurrency"`
-	Requests       int            `json:"requests_configured,omitempty"`
-	Duration       string         `json:"duration_configured,omitempty"`
-	RateLimit      float64        `json:"rate_limit,omitempty"`
-	Interrupted    bool           `json:"interrupted"`
-	ElapsedMS      float64        `json:"elapsed_ms"`
-	Total          int            `json:"total"`
-	Successes      int            `json:"responses"`
-	Errors         int            `json:"errors"`
-	Aborted        int            `json:"aborted,omitempty"`
-	RPS            float64        `json:"requests_per_sec"`
-	BytesRead      int64          `json:"bytes_read"`
-	ConnsNew       int64          `json:"connections_opened"`
-	ConnsReused    int64          `json:"connections_reused"`
-	Latency        *jsonLatency   `json:"latency_ms,omitempty"`
-	Histogram      []jsonBucket   `json:"histogram,omitempty"`
-	StatusCodes    map[string]int `json:"status_codes"`
-	ErrorBreakdown map[string]int `json:"error_breakdown"`
+	Target         string          `json:"target"`
+	Method         string          `json:"method"`
+	Concurrency    int             `json:"concurrency"`
+	Requests       int             `json:"requests_configured,omitempty"`
+	Duration       string          `json:"duration_configured,omitempty"`
+	RateLimit      float64         `json:"rate_limit,omitempty"`
+	Interrupted    bool            `json:"interrupted"`
+	Passed         bool            `json:"passed"`
+	FailReason     string          `json:"fail_reason,omitempty"`
+	ElapsedMS      float64         `json:"elapsed_ms"`
+	Total          int             `json:"total"`
+	Successes      int             `json:"responses"`
+	Errors         int             `json:"errors"`
+	Aborted        int             `json:"aborted,omitempty"`
+	RPS            float64         `json:"requests_per_sec"`
+	BytesRead      int64           `json:"bytes_read"`
+	ConnsNew       int64           `json:"connections_opened"`
+	ConnsReused    int64           `json:"connections_reused"`
+	Latency        *jsonLatency    `json:"latency_ms,omitempty"`
+	Histogram      []jsonBucket    `json:"histogram,omitempty"`
+	StatusCodes    map[string]int  `json:"status_codes"`
+	ErrorBreakdown map[string]int  `json:"error_breakdown"`
+	Thresholds     []jsonThreshold `json:"thresholds,omitempty"`
 }
 
 type jsonLatency struct {
@@ -216,6 +270,8 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		Requests:       cfg.Requests,
 		RateLimit:      cfg.RateLimit,
 		Interrupted:    res.Interrupted,
+		Passed:         r.verdict.Passed(),
+		FailReason:     r.verdict.Reason,
 		ElapsedMS:      msf(res.Elapsed),
 		Total:          res.Total,
 		Successes:      res.Successes,
@@ -227,6 +283,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		ConnsReused:    res.ConnsReused,
 		StatusCodes:    map[string]int{},
 		ErrorBreakdown: res.Errors,
+		Thresholds:     toJSONThresholds(r.verdict),
 	}
 	if cfg.Duration > 0 {
 		out.Duration = cfg.Duration.String()

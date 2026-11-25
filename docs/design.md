@@ -87,7 +87,8 @@ internal/loadtest/   Config, tuned Transport, dispatcher + worker pool, Result
 internal/flow/       flow mode: scenario file, templates, captures, virtual users
 internal/testshop/   the small shop that testserver -app shop serves
 internal/stats/      percentiles, mean/stddev, histogram (pure functions)
-internal/report/     text and JSON rendering
+internal/report/     text and JSON rendering, threshold verdict
+internal/threshold/  parse threshold expressions, compare measured values (pure)
 ```
 
 ## Tests
@@ -105,15 +106,25 @@ go test -race ./...
   connections classified correctly, method/headers/body passed through,
   Ctrl-C returning partial results promptly, and tuned vs untuned connection
   reuse.
-- `internal/report`: text and JSON output.
-- `cmd/pelt`: end-to-end run of the CLI against a local server, and bad
-  flag handling.
+- `internal/threshold`: parsing every metric, unit and operator, rejected
+  expressions with a readable reason, and the boundary where a value equals
+  its target.
+- `internal/report`: text and JSON output, the Thresholds block and verdict,
+  and the rule that a run with no responses fails.
+- `cmd/pelt`: end-to-end run of the CLI against a local server, exit code 3
+  for a missed threshold and for a dead target, and bad flag and threshold
+  handling.
 - `internal/flow`: scenario parsing and errors, templates and escaping,
   captures, weighted flow picks, and runs against the test shop: per-user
   cookies, chained captures, abort vs `on_fail: continue`, setup retries,
   duration and Ctrl-C cut-off, and the dry run.
 - `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run, and
   bad files and flags.
+
+Thresholds are checked once, after the run, against the same numbers the
+report prints. `internal/threshold` only parses and compares; the report
+package measures each metric, which keeps the parser free of run types and
+lets flow mode reuse it for per-step targets later.
 
 Flow mode shares the tuned transport with single-URL mode. Each virtual user
 gets its own `http.Client` and cookie jar on top of it and writes to its own

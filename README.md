@@ -8,8 +8,9 @@ library only.
   codes, errors by kind, and TCP connections opened vs reused.
 - **Flexible runs:** fixed count (`-n`), duration (`-d`), concurrency (`-c`)
   and a rate cap (`-rate`); any method, headers and body; HTTP/2 with `-http2`.
-- **Script friendly:** JSON output (`-o json`), exit codes, and Ctrl-C still
-  prints a report.
+- **CI ready:** pass/fail thresholds such as `-threshold 'p95<300ms'` fail
+  the job with exit code 3; JSON output (`-o json`); Ctrl-C still prints a
+  report.
 - **User flows:** `pelt run shop.json` runs virtual users through scripted
   journeys (log in, browse, check out) with cookies, captured values and a
   report per step.
@@ -50,6 +51,15 @@ Latency (successful requests):
 
 Only point it at servers you own or have permission to test. All flags,
 examples, the full output and how to read it: [docs/usage.md](docs/usage.md).
+
+To fail a CI job when the service misses its targets, add thresholds. The run
+exits 3 if any is missed:
+
+```sh
+pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
+```
+
+Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds).
 
 For multi-step journeys, describe them in a JSON file and run it:
 

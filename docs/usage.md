@@ -42,6 +42,7 @@ pelt [flags] <url>
 | `-http2` | false | Allow HTTP/2 over TLS. By default the tool forces HTTP/1.1. |
 | `-untuned` | false | Use Go's stock connection pool limits, to see why tuning matters. |
 | `-quiet` | false | Hide the live progress line (only shown on a terminal). |
+| `-threshold` | | Pass/fail target such as `'p95<300ms'` or `'errors<1%'`. Repeat for more. A missed target exits 3. See [Thresholds](#thresholds). |
 
 ## Examples
 
@@ -54,10 +55,89 @@ pelt -n 5000 -c 100 -m POST -H 'Content-Type: application/json' \
   -body '{"hello":"world"}' -o json http://127.0.0.1:8080/api | jq .latency_ms
 ```
 
+## Thresholds
+
+Thresholds turn a run into a pass or a fail, so Pelt can gate a deploy in
+CI. Give each target with `-threshold`; the run exits `3` if any is missed.
+
+```sh
+pelt -d 30s -c 200 \
+  -threshold 'p95<300ms' -threshold 'errors<1%' -threshold 'status:5xx<0.5%' \
+  https://staging.example.com/health
+```
+
+A threshold is `metric op value`, with `<`, `<=`, `>` or `>=`. Spaces are
+allowed; quote it so the shell leaves `<` and `>` alone.
+
+| Metric | Measures | Value |
+|--------|----------|-------|
+| `p50`, `p95`, `p99`, `p99.9`, any `pN` | Latency percentile of requests that got a response | Duration: `300ms`, `1.5s`, or a bare number of ms |
+| `mean`, `max` | Mean or slowest response | Duration |
+| `errors` | Transport errors (timeout, refused, reset, DNS, TLS) | Share of requests (`1%`) or a count (`5`) |
+| `status:5xx`, `status:4xx`, `status:2xx`, `status:503` | Responses with that status class or code | Share of requests or a count |
+| `rps` | Completed requests per second | Number |
+| `requests` | Completed requests, to insist the run had enough samples | Count |
+
+`errors` counts only requests that got no HTTP response, the same number as
+the report's `errors`. A 500 is a response; target it with `status:5xx`. A
+metric with nothing to measure, such as `p95` when no request got a response,
+fails with `no samples`.
+
+The text report ends with one line per threshold, failures first, and the
+result:
+
+```text
+Thresholds:
+  FAIL  status:5xx < 0.5%  1.60%  (32 of 2000)
+  PASS  p95 < 300ms        10.337 ms
+  PASS  errors < 1%        0.00%  (0 of 2000)
+
+Result: FAIL (1 of 3 thresholds missed)
+```
+
+With `-o json` the report gains `"passed"` (`true` or `false`, always
+present), `"thresholds"` (one object per threshold with `expr`, `metric`,
+`op`, `target`, `actual`, `unit`, `count`, `of` and `pass`) and, when the
+built-in rule below failed the run, `"fail_reason"`. stdout stays pure JSON;
+a failing run also prints one line to stderr, such as
+`pelt: FAIL: 1 of 3 thresholds missed`, so it shows in CI logs.
+
+**Without thresholds**, a run passes unless no request got a response at all
+(every request refused, timed out or failed DNS). That run exits `3` with
+`Result: FAIL (no request got a response)`, because a dead target is never a
+pass. Any run with at least one response exits `0`, as before.
+
+In GitHub Actions:
+
+```yaml
+- name: Load test staging
+  run: |
+    pelt -d 60s -c 100 -rate 500 -o json \
+      -threshold 'p95<300ms' -threshold 'errors<1%' -threshold 'status:5xx<0.5%' \
+      https://staging.example.com/api/health > pelt.json
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: pelt-report
+    path: pelt.json
+```
+
+Thresholds are evaluated when the run ends. Flow mode (`pelt run`) does not
+take `-threshold` yet; it gets thresholds per flow and per step in a later
+version.
+
 ## Exit codes
 
-`0` finished, `130` interrupted with Ctrl-C (report still printed), `2` bad
-flags or config, `1` other errors.
+| Code | Meaning |
+|------|---------|
+| `0` | Finished, and every threshold passed |
+| `1` | Runtime error, for example an unreadable `-body-file` |
+| `2` | Bad flags, config or threshold; nothing was sent |
+| `3` | A threshold was missed, or no request got a response |
+| `130` | Interrupted with Ctrl-C (report still printed, thresholds still shown) |
+
+An interrupted run exits `130` even when a threshold failed, because the
+person stopped it.
 
 ## Full sample output
 
