@@ -1,0 +1,94 @@
+# Runs install.ps1 on a real Windows machine against a published release,
+# in both PowerShell 7 (pwsh) and Windows PowerShell 5.1, then checks that
+# the installed pelt.exe works and that a bad checksum is refused.
+name: install-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to install
+        default: v0.1.0
+  push:
+    branches: [main]
+    paths:
+      - install.ps1
+      - .github/workflows/install-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh, powershell]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      PELT_VERSION: ${{ inputs.version || 'v0.1.0' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the way users do (script text piped to iex)
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          Get-Content -Raw .\install.ps1 | Invoke-Expression
+
+      - name: Check the binary and the user PATH
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\pelt'
+          $exe = Join-Path $dir 'pelt.exe'
+          if (-not (Test-Path $exe)) { throw "pelt.exe not found at $exe" }
+          $userPath = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if (($userPath -split ';') -notcontains $dir) { throw "user PATH does not contain $dir" }
+          & $exe -h
+          if ($LASTEXITCODE -ne 0) { throw "pelt -h exited with $LASTEXITCODE" }
+
+      - name: Run a short load test against a local server
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\pelt\pelt.exe'
+          New-Item -ItemType Directory -Force -Path site | Out-Null
+          Set-Content -Path site\index.html -Value 'ok'
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8080', '--bind', '127.0.0.1', '--directory', 'site' -PassThru
+          try {
+            for ($i = 0; $i -lt 30; $i++) {
+              try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/ | Out-Null; break } catch { Start-Sleep -Milliseconds 500 }
+            }
+            $json = & $exe -n 200 -c 10 -quiet -o json http://127.0.0.1:8080/
+            if ($LASTEXITCODE -ne 0) { throw "pelt exited with $LASTEXITCODE" }
+            $json
+            $r = ($json -join "`n") | ConvertFrom-Json
+            if ($r.responses -ne 200 -or $r.errors -ne 0 -or $r.status_codes.'200' -ne 200) {
+              throw "expected 200 responses with status 200 and no errors"
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Refuse a download whose checksum does not match
+        run: |
+          $mirror = Join-Path $env:RUNNER_TEMP 'mirror'
+          New-Item -ItemType Directory -Force -Path $mirror | Out-Null
+          $base = "https://github.com/namnguyen3019/pelt/releases/download/$env:PELT_VERSION"
+          Invoke-WebRequest -UseBasicParsing "$base/pelt_windows_amd64.zip" -OutFile "$mirror\pelt_windows_amd64.zip"
+          Set-Content -Path "$mirror\checksums.txt" -Value ('0' * 64 + '  pelt_windows_amd64.zip')
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8081', '--bind', '127.0.0.1', '--directory', $mirror -PassThru
+          try {
+            for ($i = 0; $i -lt 30; $i++) {
+              try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8081/checksums.txt | Out-Null; break } catch { Start-Sleep -Milliseconds 500 }
+            }
+            $env:PELT_BASE_URL = 'http://127.0.0.1:8081'
+            $env:PELT_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bad-install'
+            $env:PELT_NO_MODIFY_PATH = '1'
+            $out = Get-Content -Raw .\install.ps1 | Invoke-Expression 6>&1 | Out-String
+            $out
+            if ($out -notmatch 'checksum mismatch') { throw 'expected a checksum mismatch error' }
+            if (Test-Path (Join-Path $env:PELT_INSTALL_DIR 'pelt.exe')) { throw 'pelt.exe was installed despite the bad checksum' }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
