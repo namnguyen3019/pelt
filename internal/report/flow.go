@@ -51,7 +51,7 @@ func NewFlow(res *flow.Result) *FlowReport {
 		sets[i] = series.Samples{Latencies: res.Steps[i].Latencies, Finish: res.Steps[i].Finish}
 	}
 	r.ser = series.Build(res.Series, sets...)
-	r.tl = newTimeline(r.ser)
+	r.tl = newTimeline(r.ser, nil)
 	r.ser.Release()
 	for i := range res.Steps {
 		r.steps = append(r.steps, stats.Summarize(res.Steps[i].Latencies, stepPercentiles))

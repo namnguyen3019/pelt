@@ -59,6 +59,17 @@ exits 3 if any is missed:
 pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
 ```
 
+To see where a service starts to struggle, ramp the load up and down. Each
+second's rate, latency and errors land in a Timeline, in JSON and, with
+`-series out.csv`, in a CSV file:
+
+```sh
+pelt -stages 30s:200,2m:200,30s:0 -series out.csv https://staging.example.com/
+```
+
+More: [load stages](docs/usage.md#load-stages) and
+[per-second results](docs/usage.md#per-second-results).
+
 Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
 files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
 

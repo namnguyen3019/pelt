@@ -186,8 +186,9 @@ func (c *Counters) Last() int { return int(c.last.Load()) }
 type Level struct {
 	// Active is requests in flight (single-URL) or users running (flow).
 	Active int
-	// Target is what the load stages asked for at that moment, and Stage
-	// the stage in effect (1-based). Both are zero without stages.
+	// Target is what the load stages asked for in the middle of the
+	// second, and Stage the stage in effect then (1-based). Both are zero
+	// without stages.
 	Target float64
 	Stage  int
 }

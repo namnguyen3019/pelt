@@ -11,10 +11,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/report"
 	"github.com/namnguyen3019/pelt/internal/series"
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 func TestHeaderFlag(t *testing.T) {
@@ -224,8 +226,113 @@ func TestRunSeriesCSV(t *testing.T) {
 }
 
 func TestProgressLine(t *testing.T) {
-	got := progressLine(loadtest.Progress{Completed: 12345, Errors: 3, LastSecond: series.Count{Requests: 1402}})
+	p := loadtest.Progress{Completed: 12345, Errors: 3, LastSecond: series.Count{Requests: 1402}, Active: 200, Stage: 2, Target: 199.6}
+	got := progressLine(p, nil)
 	if want := "12,345 requests, 1,402 req/s last second, 3 errors"; got != want {
 		t.Errorf("progress line = %q, want %q", got, want)
+	}
+	plan, _ := stages.Parse("30s:200,2m:200,30s:0")
+	if got, want := progressLine(p, &plan), "stage 2/3  target 200  active 200  1,402 req/s  3 errors"; got != want {
+		t.Errorf("staged progress line = %q, want %q", got, want)
+	}
+	rate, _ := stages.Parse("1m:500/s,5m:500/s")
+	p.Target = 250
+	if got, want := progressLine(p, &rate), "stage 2/2  target 250/s  active 200  1,402 req/s  3 errors"; got != want {
+		t.Errorf("rate progress line = %q, want %q", got, want)
+	}
+}
+
+func TestStageFlagConflicts(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-stages", "1s:5", "-d", "10s"}, "drop -d"},
+		{[]string{"-stages", "1s:5", "-ramp", "1s"}, "not both"},
+		{[]string{"-stages", "1s:5", "-c", "9"}, "-c cannot be set"},
+		{[]string{"-stages", "1s:5/s", "-rate", "9"}, "-rate cannot be set"},
+		{[]string{"-stages", "1s:5,1s:5/s"}, "not a mix"},
+		{[]string{"-stages", "1s:-5"}, "negative"},
+		{[]string{"-stages", "1s"}, "duration:target"},
+		{[]string{"-stages", "0s:5"}, "0s"},
+		{[]string{"-ramp", "1s"}, "needs a run length"},
+		{[]string{"-ramp", "5s", "-d", "2s"}, "longer than the run"},
+	} {
+		var out, errOut bytes.Buffer
+		code := run(append(tc.args, srv.URL), &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), tc.want) {
+			t.Errorf("run(%q) = %d, stderr %q; want 2 and %q", strings.Join(tc.args, " "), code, errOut.String(), tc.want)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Errorf("server got %d requests from bad stage flags", hits.Load())
+	}
+}
+
+func TestRampIsShortForStages(t *testing.T) {
+	set := map[string]bool{"ramp": true, "d": true, "c": true}
+	got, err := stagesFromFlags("", 30*time.Second, 3*time.Minute, 200, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long, _ := stages.Parse("30s:200,2m30s:200")
+	if got.String() != long.String() || got.Kind != long.Kind {
+		t.Errorf("-ramp 30s -c 200 -d 3m = %q, want %q", got, long)
+	}
+}
+
+func TestRunStagesJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-stages", "1s:4,1s:4,0s:2,1s:2", "-o", "json", srv.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	var rep struct {
+		Concurrency int    `json:"concurrency"`
+		Spec        string `json:"stages_configured"`
+		Total       int    `json:"total"`
+		Stages      []struct {
+			Stage    int      `json:"stage"`
+			From     float64  `json:"from"`
+			Target   float64  `json:"target"`
+			StartS   float64  `json:"start_s"`
+			EndS     float64  `json:"end_s"`
+			Requests int      `json:"requests"`
+			P95      *float64 `json:"p95_ms"`
+		} `json:"stages"`
+		Series []struct {
+			Stage  *int     `json:"stage"`
+			Target *float64 `json:"target"`
+		} `json:"series"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, stdout.String())
+	}
+	if rep.Concurrency != 4 || rep.Spec != "1s:4,1s:4,0s:2,1s:2" || len(rep.Stages) != 4 {
+		t.Fatalf("report = %+v", rep)
+	}
+	sum := 0
+	for _, s := range rep.Stages {
+		sum += s.Requests
+	}
+	if sum != rep.Total {
+		t.Errorf("stages add up to %d requests, run total %d", sum, rep.Total)
+	}
+	if s := rep.Stages[2]; s.Requests != 0 || s.P95 != nil || s.From != 4 || s.Target != 2 || s.StartS != 2 || s.EndS != 2 {
+		t.Errorf("the 0s stage = %+v, want an empty jump from 4 to 2 at 2s", s)
+	}
+	// Second 0 is the middle of the ramp to 4; second 2 is stage 4.
+	if len(rep.Series) < 3 || rep.Series[0].Stage == nil || *rep.Series[0].Stage != 1 || *rep.Series[0].Target != 2 ||
+		*rep.Series[1].Target != 4 || *rep.Series[2].Stage != 4 || *rep.Series[2].Target != 2 {
+		for _, r := range rep.Series {
+			t.Logf("stage %v target %v", *r.Stage, *r.Target)
+		}
+		t.Errorf("series stage/target not filled in")
 	}
 }
