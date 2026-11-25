@@ -49,22 +49,28 @@ jobs:
           & $exe -h
           if ($LASTEXITCODE -ne 0) { throw "pelt -h exited with $LASTEXITCODE" }
 
+      - name: Set up Go (for Pelt's local test server)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
       - name: Run a short load test against a local server
         run: |
           $exe = Join-Path $env:LOCALAPPDATA 'Programs\pelt\pelt.exe'
-          New-Item -ItemType Directory -Force -Path site | Out-Null
-          Set-Content -Path site\index.html -Value 'ok'
-          $server = Start-Process python -ArgumentList '-m', 'http.server', '8080', '--bind', '127.0.0.1', '--directory', 'site' -PassThru
+          go build -o testserver.exe ./cmd/testserver
+          if ($LASTEXITCODE -ne 0) { throw 'could not build testserver' }
+          $server = Start-Process .\testserver.exe -ArgumentList '-addr', '127.0.0.1:8080' -PassThru
           try {
             for ($i = 0; $i -lt 30; $i++) {
               try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/ | Out-Null; break } catch { Start-Sleep -Milliseconds 500 }
             }
-            $json = & $exe -n 200 -c 10 -quiet -o json http://127.0.0.1:8080/
+            $json = & $exe -n 2000 -c 50 -quiet -o json http://127.0.0.1:8080/
             if ($LASTEXITCODE -ne 0) { throw "pelt exited with $LASTEXITCODE" }
-            $json
             $r = ($json -join "`n") | ConvertFrom-Json
-            if ($r.responses -ne 200 -or $r.errors -ne 0 -or $r.status_codes.'200' -ne 200) {
-              throw "expected 200 responses with status 200 and no errors"
+            "responses=$($r.responses) errors=$($r.errors) req/s=$($r.requests_per_sec) opened=$($r.connections_opened) reused=$($r.connections_reused)"
+            if ($r.responses -ne 2000 -or $r.errors -ne 0 -or $r.status_codes.'200' -ne 2000) {
+              $json
+              throw 'expected 2000 responses with status 200 and no errors'
             }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
