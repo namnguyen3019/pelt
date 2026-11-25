@@ -39,7 +39,7 @@ type Config struct {
 	HTTP2 bool
 	// Untuned uses Go's stock transport limits (2 idle connections per
 	// host) instead of sizing the pool to Concurrency. Useful only to show
-	// why tuning matters; see the README.
+	// why tuning matters; see docs/design.md.
 	Untuned bool
 }
 
