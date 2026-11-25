@@ -128,8 +128,9 @@ environment variable as in recipe 5.
 ## User flows: `pelt run`
 
 Use this when the test is a journey rather than one URL. Check that the
-installed version has it: `pelt run -h` (it is unmerged on the main branch
-for now; build from the branch that has it if `pelt run` is unknown).
+installed version has it: `pelt run -h`. It is on the main branch but not
+in a release yet, so if `pelt run` is unknown, install from main:
+`go install github.com/namnguyen3019/pelt/cmd/pelt@main`.
 
 ```text
 pelt run [flags] <scenario.json>
