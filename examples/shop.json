@@ -1,0 +1,56 @@
+{
+  "name": "shop",
+  "base_url": "http://127.0.0.1:8080",
+  "load": { "users": 20, "duration": "30s", "timeout": "10s" },
+  "defaults": {
+    "headers": { "Accept": "application/json" },
+    "think": "200ms-1s"
+  },
+  "vars": { "page_size": 20 },
+  "data": { "file": "users.csv", "mode": "unique" },
+
+  "setup": [
+    {
+      "name": "login",
+      "method": "POST",
+      "url": "/login",
+      "json": { "username": "{{username}}", "password": "{{password}}" },
+      "check": { "status": 200 },
+      "capture": [ { "json": "token", "as": "token" } ]
+    }
+  ],
+
+  "flows": [
+    {
+      "name": "browse",
+      "weight": 7,
+      "steps": [
+        { "name": "list products", "url": "/products?limit={{page_size}}",
+          "check": { "status": 200 },
+          "capture": [ { "json": "items[0].id", "as": "product_id" } ] },
+        { "name": "view product", "url": "/products/{{product_id}}",
+          "check": { "status": 200 } }
+      ]
+    },
+    {
+      "name": "checkout",
+      "weight": 3,
+      "steps": [
+        { "name": "list products", "url": "/products?limit={{page_size}}",
+          "check": { "status": 200 },
+          "capture": [ { "json": "items[1].id", "as": "product_id" } ] },
+        { "name": "add to cart", "method": "POST", "url": "/cart",
+          "headers": { "Authorization": "Bearer {{token}}" },
+          "json": { "product_id": "{{product_id}}", "qty": 1 },
+          "check": { "status": [200, 201] } },
+        { "name": "checkout", "method": "POST", "url": "/checkout",
+          "headers": { "Authorization": "Bearer {{token}}" },
+          "check": { "status": 201 },
+          "capture": [ { "json": "order_id", "as": "order_id" } ],
+          "think": "0s" },
+        { "name": "order status", "url": "/orders/{{order_id}}",
+          "check": { "status": 200 } }
+      ]
+    }
+  ]
+}

@@ -51,3 +51,8 @@ func newTransport(cfg Config) *http.Transport {
 	}
 	return t
 }
+
+// NewTransport returns the tuned transport for cfg, sized to
+// cfg.Concurrency, for other packages (flow mode) that drive their own
+// clients. Only Concurrency, Timeout, HTTP2 and Untuned are used.
+func NewTransport(cfg Config) *http.Transport { return newTransport(cfg) }

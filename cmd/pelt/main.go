@@ -3,6 +3,7 @@
 //
 //	pelt -n 10000 -c 200 http://127.0.0.1:8080/
 //	pelt -d 30s -c 500 -rate 2000 http://127.0.0.1:8080/
+//	pelt run -u 50 -d 2m shop.json      # flow mode, see docs/flows.md
 //
 // Press Ctrl-C once to stop early and still get a report. Press it again to
 // quit immediately.
@@ -50,10 +51,16 @@ func main() {
 // run holds the whole program so it can return an exit code (and be tested)
 // instead of calling os.Exit from deep inside.
 func run(args []string, stdout, stderr io.Writer) int {
+	// Flow mode is only ever the first argument. A URL has to start with
+	// http:// or https://, so nothing that worked before changes meaning.
+	if len(args) > 0 && args[0] == "run" {
+		return runFlow(args[1:], stdout, stderr)
+	}
+
 	fs := flag.NewFlagSet("pelt", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: pelt [flags] <url>\n\nFlags:\n")
+		fmt.Fprintf(stderr, "Usage: pelt [flags] <url>\n       pelt run [flags] <scenario.json>   (flow mode; pelt run -h for its flags)\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 

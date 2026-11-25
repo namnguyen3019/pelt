@@ -1,6 +1,6 @@
 ---
 name: pelt
-description: Load test and benchmark an HTTP or HTTPS endpoint with the Pelt CLI. Use when asked to measure requests per second, latency percentiles (p50/p95/p99), error rate or connection reuse of an API or web server, to stress test or smoke test an endpoint under concurrent load, or to compare performance before and after a change. Not for multi-step user journeys or browser testing.
+description: Load test and benchmark an HTTP or HTTPS endpoint with the Pelt CLI. Use when asked to measure requests per second, latency percentiles (p50/p95/p99), error rate or connection reuse of an API or web server, to stress test or smoke test an endpoint under concurrent load, to compare performance before and after a change, or to load test a multi-step user journey (log in, browse, check out) written as a JSON scenario with `pelt run`. Not for browser testing.
 compatibility: Needs the pelt binary on PATH (Linux, macOS or Windows) and network access to the target.
 ---
 
@@ -8,7 +8,9 @@ compatibility: Needs the pelt binary on PATH (Linux, macOS or Windows) and netwo
 
 Pelt sends many concurrent HTTP requests at one URL and reports throughput,
 latency percentiles, a latency histogram, status codes, errors grouped by
-kind, and TCP connections opened vs reused.
+kind, and TCP connections opened vs reused. With `pelt run <scenario.json>`
+it instead runs virtual users through scripted flows and reports per step and
+per flow; see [User flows](#user-flows-pelt-run).
 
 ## Safety rules (read first)
 
@@ -27,6 +29,12 @@ kind, and TCP connections opened vs reused.
   unbounded run.
 - Requests with side effects (POST, PUT, DELETE) repeat thousands of times.
   Only send them to an endpoint where that is safe, such as a test database.
+- Flows usually write data (sign-ups, carts, orders) on every iteration. Run
+  them only against a test system, never production, and check them with
+  `-dry-run` before any load.
+- Never write passwords or tokens into a scenario file; use `{{$env NAME}}`.
+  `-dry-run` prints headers and bodies in full, so don't paste its output
+  anywhere public.
 
 ## Install
 
@@ -117,7 +125,92 @@ jumps. The last good step is the capacity estimate.
 Never put real secrets on the command line in your reply; read them from an
 environment variable as in recipe 5.
 
-## Reading the JSON output
+## User flows: `pelt run`
+
+Use this when the test is a journey rather than one URL. Check that the
+installed version has it: `pelt run -h` (it is unmerged on the main branch
+for now; build from the branch that has it if `pelt run` is unknown).
+
+```text
+pelt run [flags] <scenario.json>
+```
+
+A minimal scenario:
+
+```json
+{
+  "name": "shop",
+  "base_url": "http://127.0.0.1:8080",
+  "load": { "users": 10, "duration": "30s" },
+  "defaults": { "think": "200ms-1s" },
+  "data": { "file": "users.csv", "mode": "unique" },
+  "setup": [
+    { "name": "login", "method": "POST", "url": "/login",
+      "json": { "username": "{{username}}", "password": "{{password}}" },
+      "check": { "status": 200 },
+      "capture": [ { "json": "token", "as": "token" } ] }
+  ],
+  "flows": [
+    { "name": "browse", "weight": 7, "steps": [
+      { "name": "list", "url": "/products", "check": { "status": 200 },
+        "capture": [ { "json": "items[0].id", "as": "id" } ] },
+      { "name": "view", "url": "/products/{{id}}", "check": { "status": 200 } } ] },
+    { "name": "checkout", "weight": 3, "steps": [
+      { "name": "add", "method": "POST", "url": "/cart",
+        "headers": { "Authorization": "Bearer {{token}}" },
+        "json": { "product_id": 1, "qty": 1 }, "check": { "status": 200 } },
+      { "name": "pay", "method": "POST", "url": "/checkout",
+        "headers": { "Authorization": "Bearer {{token}}" },
+        "check": { "status": 201 } } ] }
+  ]
+}
+```
+
+- Each user runs `setup` once, then loops: pick a flow by weight, run its
+  steps in order, think between steps. Each user has its own cookie jar.
+- `{{name}}` reads captures, setup captures, the user's CSV row, then `vars`.
+  Built-ins: `{{$vu}}`, `{{$iteration}}`, `{{$uuid}}`, `{{$rand 1 100}}`,
+  `{{$env NAME}}`. Unknown names fail at load.
+- Captures: `json` (dot path like `items[0].id`), `header`, `regex`, `status`.
+- A failed `check.status` or an empty capture aborts the rest of that
+  iteration unless the step has `"on_fail": "continue"`. A step with no
+  `check` accepts any status, so add checks.
+- Unknown keys are errors (exit 2, with line and column).
+
+Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
+total iterations, `-t` timeout, `-base` base URL, `-seed`, `-o json`,
+`-quiet`, `-http2`, `-dry-run`. They may go before or after the file.
+
+```sh
+# 1. Always first: one user, setup and each flow once, every request printed.
+#    Exits 1 if any step failed.
+pelt run scenario.json -dry-run -base http://127.0.0.1:8080
+
+# 2. Small run, then raise -u step by step
+pelt run scenario.json -u 5 -d 30s -o json
+
+# 3. Pull out the key numbers
+pelt run scenario.json -u 20 -d 1m -o json \
+  | jq '{iterations, failed_checks, errors, status_codes,
+         steps: [.steps[] | {flow, name, failed_checks, p95: .latency_ms.percentiles.p95}]}'
+```
+
+JSON has `"mode": "flow"`, the same top-level totals as single-URL mode,
+plus `iterations` (`started`, `completed`, `aborted`, `cut`, `per_sec`),
+`failed_checks`, `setup_failed_users`, `flows[]` (with `aborted_at`,
+`flow_time_ms` = request time only, `wall_time_ms` = with think time) and
+`steps[]` (per step: `requests`, `errors`, `failed_checks`, `latency_ms`,
+`status_codes`). A run is healthy only if `failed_checks`, `errors` and
+`setup_failed_users` are 0 and `iterations.aborted` is small; exit code 0 does
+not mean that. `cut` iterations were stopped by the end of the run, not
+failures. Full reference: `docs/flows.md` in the repository.
+
+To practise locally: `testserver -app shop -addr 127.0.0.1:8080` serves a
+small shop (`POST /login` for users `user001`..., `GET /products`,
+`POST /cart`, `POST /checkout`, `GET /orders/{id}`), and
+`examples/shop.json` with `examples/users.csv` is a scenario for it.
+
+## Reading the JSON output (single-URL mode)
 
 ```json
 {
@@ -201,8 +294,11 @@ separate host.
 
 ## Limits
 
-- One URL per run, no scripted user flows, cookies or per-request variation.
-  For multi-step journeys use a scripted tool such as Locust or k6.
+- Single-URL mode sends one fixed request; use `pelt run` for journeys,
+  cookies and per-request variation.
+- Flow mode has no ramp-up, target-rate mode, branches or loops yet, and
+  checks only look at the status code. For journeys that need real code, use
+  a scripted tool such as Locust or k6.
 - Closed loop: a worker waits for each response before sending the next, so
   a stalling server gets fewer requests (coordinated omission) and tail
   latency can look better than real users would see. `-rate` with ample `-c`
