@@ -71,7 +71,7 @@ Status codes:
 
 ## Install
 
-**One-line installer** (Linux and macOS, amd64 and arm64):
+**One-line installer, Linux and macOS** (amd64 and arm64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | sh
@@ -87,6 +87,23 @@ curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh 
 
 # somewhere you own, no sudo
 curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+**One-line installer, Windows** (amd64 and arm64), in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.ps1 | iex
+```
+
+It downloads `pelt_windows_<arch>.zip`, checks its SHA-256 against
+`checksums.txt`, puts `pelt.exe` in `%LOCALAPPDATA%\Programs\pelt` and adds
+that folder to your user PATH, so no admin rights are needed. `pelt` works
+right away in that window; other open terminals need restarting. To pick a version or folder, set `PELT_VERSION` (e.g.
+`v0.1.0`) or `PELT_INSTALL_DIR` first, or set `PELT_NO_MODIFY_PATH=1` to leave
+PATH alone:
+
+```powershell
+$env:PELT_VERSION = 'v0.1.0'; irm https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.ps1 | iex
 ```
 
 **Prebuilt binary.** Every [release](https://github.com/namnguyen3019/pelt/releases)

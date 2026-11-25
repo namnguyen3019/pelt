@@ -36,9 +36,18 @@ Check first: `pelt -h`. If it is missing:
 # With Go 1.23+ (use the lowercase module path)
 go install github.com/namnguyen3019/pelt/cmd/pelt@latest
 
-# Prebuilt binary for Linux/macOS, once a release exists
+# Prebuilt binary, Linux or macOS
 curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
 ```
+
+```powershell
+# Prebuilt binary, Windows (PowerShell, no admin; installs to
+# %LOCALAPPDATA%\Programs\pelt and adds it to the user PATH)
+irm https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.ps1 | iex
+```
+
+The Windows installer also updates PATH for the current session, so `pelt`
+works right away there; other open terminals need restarting.
 
 `go install` puts the binary in `$(go env GOPATH)/bin`; add that to PATH if
 `pelt` is not found. For a local practice target, also install
