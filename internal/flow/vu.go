@@ -31,6 +31,7 @@ type vu struct {
 	iterVars  map[string]string // captured in the current iteration
 	saveTo    map[string]string // where captures go right now
 	iteration int               // 1-based count of this user's iterations
+	running   bool              // counted in the runner's active users
 
 	trace func(*StepTrace) // dry run only
 }
@@ -97,11 +98,19 @@ const (
 )
 
 // run is the user's life: setup once, then one flow iteration per job.
+// With stages, a user waits for its turn before setup and before every
+// iteration: when the target drops below its number it parks, keeping its
+// cookies and setup values, and when the target rises again it carries on
+// without running setup again.
 func (v *vu) run(reqCtx, stopCtx context.Context, jobs <-chan struct{}) {
-	if !v.setup(reqCtx, stopCtx) {
+	defer v.setRunning(false)
+	if !v.waitTurn(stopCtx) || !v.setup(reqCtx, stopCtx) {
 		return
 	}
-	for range jobs {
+	for v.waitTurn(stopCtx) {
+		if _, ok := <-jobs; !ok {
+			return
+		}
 		v.iteration++
 		fl := v.r.pick(v.rng.IntN(v.r.cumWeight[len(v.r.cumWeight)-1]))
 		out := v.runFlow(reqCtx, stopCtx, fl, true)
@@ -111,6 +120,71 @@ func (v *vu) run(reqCtx, stopCtx context.Context, jobs <-chan struct{}) {
 			c.Iteration(c.Now(), out == failed)
 		}
 		v.r.iterations.Add(1)
+	}
+}
+
+// over reports whether the stages want fewer users than this one's number.
+func (v *vu) over() bool {
+	return v.r.opts.Stages != nil && int64(v.id) > v.r.target.Load()
+}
+
+// setRunning keeps the runner's count of active users.
+func (v *vu) setRunning(b bool) {
+	if v.running != b {
+		v.running = b
+		if b {
+			v.r.active.Add(1)
+		} else {
+			v.r.active.Add(-1)
+		}
+	}
+}
+
+// waitTurn returns at once without stages. With stages it parks the user
+// while the target is below its number. It reports false when the run
+// stops or no more iterations will be handed out.
+func (v *vu) waitTurn(stop context.Context) bool {
+	for {
+		// Load the channel before the target, so a change between the two
+		// still wakes this user.
+		ch := v.r.changed.Load()
+		if !v.over() {
+			v.setRunning(true)
+			return true
+		}
+		v.setRunning(false)
+		select {
+		case <-stop.Done():
+			return false
+		case <-v.r.noMoreJobs:
+			return false
+		case <-*ch:
+		}
+	}
+}
+
+// think waits d, as sleepCtx does, but with stages it stops waiting as
+// soon as this user is over the target: the iteration finishes without
+// its remaining think time and the user parks. It reports false only when
+// the run stops.
+func (v *vu) think(stop context.Context, d time.Duration) bool {
+	if v.r.opts.Stages == nil {
+		return sleepCtx(stop, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	for {
+		ch := v.r.changed.Load()
+		if v.over() {
+			return stop.Err() == nil
+		}
+		select {
+		case <-stop.Done():
+			return false
+		case <-t.C:
+			return true
+		case <-*ch:
+		}
 	}
 }
 
@@ -179,7 +253,7 @@ func (v *vu) runSteps(reqCtx, stopCtx context.Context, steps []*Step, think bool
 			if st.Think.Max > st.Think.Min {
 				d += time.Duration(v.rng.Int64N(int64(st.Think.Max - st.Think.Min + 1)))
 			}
-			if !sleepCtx(stopCtx, d) && i < len(steps)-1 {
+			if !v.think(stopCtx, d) && i < len(steps)-1 {
 				return cut, flowTime
 			}
 		}

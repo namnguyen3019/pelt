@@ -161,9 +161,15 @@ go test -race ./...
   and escaping, captures, weighted flow picks, and runs against the test shop: per-user
   cookies, chained captures, abort vs `on_fail: continue`, setup retries,
   duration and Ctrl-C cut-off, and the dry run.
+- `internal/flow` with stages: `load.stages` parsing and errors with their
+  line, setup once per user with cookies kept while users park and wake, a
+  ramp down to 0 that cuts no iteration, `-i` ending a staged run with users
+  parked, and the dry run ignoring stages.
 - `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run,
   exit 3 and 0 for thresholds from the file and the command line,
-  `-no-thresholds`, and bad files, flags and threshold scopes.
+  `-no-thresholds`, bad files, flags and threshold scopes, exit 2 for every
+  stage conflict with nothing sent, stages from the file and from `-stages`,
+  and `-ramp` building the same stages as its long form.
 
 Thresholds are checked once, after the run, against the same numbers the
 report prints. `internal/threshold` only parses and compares; the report
@@ -177,10 +183,23 @@ gets its own `http.Client` and cookie jar on top of it and writes to its own
 recorder, which are merged after the run, so the hot path takes no locks.
 See [flows.md](flows.md#how-the-users-run).
 
+**Flow stages.** In flow mode stages move users, not requests, so the
+runner starts a goroutine for every user up to the highest target and lets
+the target decide which may run. A controller ticks every 100 ms and stores
+the target, rounded, in an atomic; when it changes, the controller closes a
+channel and swaps in a new one, which wakes every waiting user at once
+without a lock. User *n* runs setup the first time the target reaches *n*,
+so logins happen once per user. Between iterations, a user above the target
+parks on that channel, keeping its cookie jar, captures and random source,
+and resumes when the target rises again. A user above the target that is
+thinking stops thinking early; one in the middle of steps finishes them, so
+a ramp down cuts no iteration short. The dispatcher closes a channel once it
+stops handing out iterations, so parked users leave as soon as `-i` ends
+the run. Users count as active only while running setup or an iteration.
+
 ## Ideas for later
 
 - Open-loop mode that corrects for coordinated omission
 - HDR histogram for constant memory on very long runs
-- Load stages in flow mode (users that ramp up and down)
 - Flow mode: a target-rate (open) model
 - Stopping a run early when a threshold is clearly missed

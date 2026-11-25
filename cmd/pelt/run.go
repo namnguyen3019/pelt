@@ -15,6 +15,7 @@ import (
 
 	"github.com/namnguyen3019/pelt/internal/flow"
 	"github.com/namnguyen3019/pelt/internal/report"
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 // runFlow is `pelt run [flags] <scenario.json>`: flow mode.
@@ -40,6 +41,8 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		http2    = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
 		dryRun   = fs.Bool("dry-run", false, "run setup and each flow once as one user, print every request and response, and exit")
 		noFile   = fs.Bool("no-thresholds", false, "ignore the file's thresholds (-threshold flags still apply)")
+		stageArg = fs.String("stages", "", "move the number of users over the run, e.g. 1m:100,5m:100,1m:0 (replaces the file's load.stages, users and duration)")
+		ramp     = fs.Duration("ramp", 0, "ramp users up from 0 over this long, then hold until the end of the run (short for -stages RAMP:U,REST:U)")
 		cliTs    thresholdFlag
 	)
 	fs.Var(&cliTs, "threshold", "pass/fail target, e.g. 'p95<500ms' or 'checkout/pay: errors<1%' (repeatable; added to the file's)")
@@ -109,6 +112,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 	}
 	if set["u"] && *users < 1 {
 		fmt.Fprintln(stderr, "error: -u must be at least 1")
+		return 2
+	}
+	if err := flowStages(&opts, *stageArg, *ramp, set); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
 	}
 	opts.HTTP2 = *http2
@@ -182,13 +189,61 @@ func randomSeed() uint64 {
 }
 
 func startFlowProgress(r *flow.Runner, w io.Writer) (stop func()) {
-	return redraw(w, func() string { return flowProgressLine(r.Progress()) })
+	plan := r.Options().Stages
+	return redraw(w, func() string { return flowProgressLine(r.Progress(), plan) })
+}
+
+// flowStages applies -stages and -ramp to opts and rejects flags that
+// clash with stages, from the file or the command line.
+func flowStages(opts *flow.Options, spec string, ramp time.Duration, set map[string]bool) error {
+	switch {
+	case set["stages"] && set["ramp"]:
+		return errors.New("use -stages or -ramp, not both (-ramp 30s is short for -stages 30s:U,REST:U)")
+	case set["stages"]:
+		p, err := stages.Parse(spec)
+		if err != nil {
+			return fmt.Errorf("-stages: %v", err)
+		}
+		switch {
+		case p.Kind == stages.Rate:
+			return errors.New("-stages: flow stages move users, such as 1m:100; rate stages (500/s) are for single-URL mode only for now")
+		case set["d"]:
+			return fmt.Errorf("-stages already set the run length (%s); drop -d, or add a stage", stages.Dur(p.Total()))
+		case set["u"]:
+			return errors.New("-stages moves the number of users, so -u cannot be set too; the highest stage target is the most users")
+		}
+		opts.Stages, opts.Users, opts.Duration = &p, 0, 0
+	case set["ramp"]:
+		if opts.Stages != nil {
+			return errors.New("the file already has load.stages; drop -ramp, or replace them with -stages")
+		}
+		u := opts.Users
+		if u == 0 {
+			u = 1
+		}
+		p, err := stages.Ramp(ramp, opts.Duration, float64(u))
+		if err != nil {
+			return err
+		}
+		opts.Stages, opts.Users, opts.Duration = &p, 0, 0
+	case opts.Stages != nil && set["d"]:
+		return fmt.Errorf("the file's load.stages set the run length (%s); drop -d, or use -stages to replace them", stages.Dur(opts.Stages.Total()))
+	case opts.Stages != nil && set["u"]:
+		return errors.New("the file's load.stages move the number of users, so -u cannot be set too; use -stages to replace them")
+	}
+	return nil
 }
 
 // flowProgressLine is the live line for flow mode: iterations so far, and
 // iterations and requests in the last whole second, and failed checks.
-func flowProgressLine(p flow.Progress) string {
+// With stages it leads with the stage, its target now and active users.
+func flowProgressLine(p flow.Progress, plan *stages.Plan) string {
 	last := p.LastSecond
+	if plan != nil {
+		return fmt.Sprintf("stage %d/%d  target %d  active %s  %s it/s  %s req/s  %s failed checks",
+			p.Stage, len(plan.Stages), p.Target, report.GroupInt(p.Active),
+			report.GroupInt(int64(last.Iterations)), report.GroupInt(int64(last.Requests)), report.GroupInt(p.CheckFails))
+	}
 	return fmt.Sprintf("%s iterations, %s/s and %s req/s last second, %s failed checks",
 		report.GroupInt(p.Iterations), report.GroupInt(int64(last.Iterations)),
 		report.GroupInt(int64(last.Requests)), report.GroupInt(p.CheckFails))

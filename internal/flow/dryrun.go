@@ -15,7 +15,7 @@ import (
 // and what each capture and check found. It is for debugging a scenario
 // file, not for measuring. It reports whether every step passed.
 func DryRun(ctx context.Context, sc *Scenario, opts Options, w io.Writer) bool {
-	opts.Users, opts.Iterations, opts.Duration = 1, 1, 0
+	opts.Users, opts.Iterations, opts.Duration, opts.Stages = 1, 1, 0, nil
 	r, err := New(sc, opts)
 	if err != nil {
 		fmt.Fprintf(w, "error: %v\n", err)

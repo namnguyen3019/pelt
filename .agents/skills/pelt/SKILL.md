@@ -268,9 +268,23 @@ A minimal scenario:
 - Unknown keys are errors (exit 2, with line and column).
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
-total iterations, `-t` timeout, `-base` base URL, `-seed`, `-o json`,
-`-series out.csv`, `-quiet`, `-http2`, `-dry-run`, plus `-threshold` (repeatable) and
-`-no-thresholds`. They may go before or after the file.
+total iterations, `-t` timeout, `-stages`, `-ramp`, `-base` base URL,
+`-seed`, `-o json`, `-series out.csv`, `-quiet`, `-http2`, `-dry-run`, plus
+`-threshold` (repeatable) and `-no-thresholds`. They may go before or after
+the file.
+
+Stages move the number of users over the run. In the file, put them in
+`load` in place of `users` and `duration`:
+`"stages": [{"duration": "1m", "users": 50}, {"duration": "5m", "users": 50}, {"duration": "1m", "users": 0}]`
+(`name` optional). On the command line, `-stages 1m:50,5m:50,1m:0` replaces
+the file's stages, users and duration, and `-ramp 30s` ramps from 0 to `-u`
+(or the file's users), then holds for the rest of `-d`. Users start, and run
+setup, the first time the target reaches them; users above a falling target
+finish their iteration and wait with their cookies kept. Never combine
+stages with `-d` or `-u` (exit 2). Flow stages move users only; rate stages
+(`500/s`) are single-URL only. The report adds a Stages block (with
+`iter/s`) and JSON `stages_configured` and `stages` (per stage as in
+single-URL mode, plus `iterations`, `iterations_per_sec`, `failed_checks`).
 
 ```sh
 # 1. Always first: one user, setup and each flow once, every request printed.
@@ -279,6 +293,10 @@ pelt run scenario.json -dry-run -base http://127.0.0.1:8080
 
 # 2. Small run, then raise -u step by step
 pelt run scenario.json -u 5 -d 30s -o json
+
+# 2b. Or step the users up in one run and read the stages
+pelt run scenario.json -stages 0s:5,1m:5,0s:20,1m:20,0s:50,1m:50 -o json \
+  | jq '.stages[] | {stage, target, rps, iterations_per_sec, p95_ms, errors, failed_checks}'
 
 # 3. Pull out the key numbers
 pelt run scenario.json -u 20 -d 1m -o json \
@@ -434,7 +452,7 @@ separate host.
 
 - Single-URL mode sends one fixed request; use `pelt run` for journeys,
   cookies and per-request variation.
-- Flow mode has no ramp-up, target-rate mode, branches or loops yet, and
+- Flow mode has no target-rate mode or rate stages, branches or loops yet, and
   checks only look at the status code. For journeys that need real code, use
   a scripted tool such as Locust or k6.
 - Closed loop: a worker waits for each response before sending the next, so
