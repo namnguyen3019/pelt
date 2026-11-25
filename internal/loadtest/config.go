@@ -5,9 +5,12 @@ package loadtest
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 // Config describes one load test run.
@@ -41,6 +44,13 @@ type Config struct {
 	// host) instead of sizing the pool to Concurrency. Useful only to show
 	// why tuning matters; see docs/design.md.
 	Untuned bool
+
+	// Stages, when set, change the load over the run and set its length,
+	// so Duration must be 0; Requests still stops the run early. Level
+	// stages move the number of requests in flight, and Concurrency becomes
+	// their highest target. Rate stages move requests per second, so
+	// RateLimit must be 0, and Concurrency caps requests in flight.
+	Stages *stages.Plan
 }
 
 // Validate fills in defaults and reports configuration errors.
@@ -64,7 +74,20 @@ func (c *Config) Validate() error {
 	if c.Duration < 0 {
 		return errors.New("duration cannot be negative")
 	}
-	if c.Requests == 0 && c.Duration == 0 {
+	if c.Stages != nil {
+		if c.Duration > 0 {
+			return errors.New("stages set the run length, so a duration cannot be set too")
+		}
+		switch c.Stages.Kind {
+		case stages.Level:
+			c.Concurrency = int(math.Ceil(c.Stages.Max()))
+		case stages.Rate:
+			if c.RateLimit > 0 {
+				return errors.New("rate stages set the request rate, so a rate limit cannot be set too")
+			}
+		}
+	}
+	if c.Requests == 0 && c.Duration == 0 && c.Stages == nil {
 		return errors.New("set a number of requests, a duration, or both")
 	}
 	if c.Concurrency < 1 {

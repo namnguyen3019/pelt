@@ -3,6 +3,7 @@
 //
 //	pelt -n 10000 -c 200 http://127.0.0.1:8080/
 //	pelt -d 30s -c 500 -rate 2000 http://127.0.0.1:8080/
+//	pelt -stages 30s:200,2m:200,30s:0 http://127.0.0.1:8080/
 //	pelt -d 30s -threshold 'p95<300ms' -threshold 'errors<1%' http://127.0.0.1:8080/
 //	pelt run -u 50 -d 2m shop.json      # flow mode, see docs/flows.md
 //
@@ -28,6 +29,7 @@ import (
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/report"
+	"github.com/namnguyen3019/pelt/internal/stages"
 	"github.com/namnguyen3019/pelt/internal/threshold"
 )
 
@@ -136,6 +138,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		untuned    = fs.Bool("untuned", false, "use Go's stock connection pool limits (for comparison)")
 		output     = fs.String("o", "text", "output format: text or json")
 		seriesOut  = fs.String("series", "", "also write one row per second of the run to this CSV file")
+		stagesArg  = fs.String("stages", "", "change the load over the run, e.g. 30s:200,2m:200,30s:0 (concurrency) or 1m:500/s,5m:500/s (rate); sets the run length")
+		ramp       = fs.Duration("ramp", 0, "ramp concurrency from 0 up to -c over this long, then hold for the rest of -d")
 		quiet      = fs.Bool("quiet", false, "hide the live progress line")
 	)
 	fs.Var(&headers, "H", "request header 'Name: value' (repeatable)")
@@ -152,11 +156,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// With -d and no explicit -n, run for the full duration instead of
-	// stopping at the default 200 requests.
-	nSet := false
-	fs.Visit(func(f *flag.Flag) { nSet = nSet || f.Name == "n" })
-	if *d > 0 && !nSet {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	plan, err := stagesFromFlags(*stagesArg, *ramp, *d, *c, set)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
+	}
+	if plan != nil {
+		*d = 0 // the stages set the run length
+	}
+
+	// With -d or stages and no explicit -n, run for the full length instead
+	// of stopping at the default 200 requests.
+	if (*d > 0 || plan != nil) && !set["n"] {
 		*n = 0
 	}
 
@@ -204,6 +217,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		RateLimit:   *rate,
 		HTTP2:       *http2,
 		Untuned:     *untuned,
+		Stages:      plan,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -246,6 +260,38 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return finish(verdict, res.Interrupted, *output == "json", stderr)
 }
 
+// stagesFromFlags builds the load stages from -stages or -ramp, or returns
+// nil when neither is set. Every conflict is an error before any load is
+// sent: two ways to say how long the run is, or two values for the knob
+// the stages move.
+func stagesFromFlags(spec string, ramp, d time.Duration, c int, set map[string]bool) (*stages.Plan, error) {
+	switch {
+	case set["stages"] && set["ramp"]:
+		return nil, errors.New("use -stages or -ramp, not both (-ramp 30s is short for -stages 30s:C,REST:C)")
+	case set["stages"]:
+		p, err := stages.Parse(spec)
+		if err != nil {
+			return nil, fmt.Errorf("-stages: %v", err)
+		}
+		switch {
+		case set["d"]:
+			return nil, fmt.Errorf("-stages already set the run length (%s); drop -d, or add a stage", stages.Dur(p.Total()))
+		case p.Kind == stages.Level && set["c"]:
+			return nil, errors.New("-stages moves concurrency, so -c cannot be set too; the highest stage target is the number of workers")
+		case p.Kind == stages.Rate && set["rate"]:
+			return nil, errors.New("-stages moves the request rate, so -rate cannot be set too; use -c to cap requests in flight")
+		}
+		return &p, nil
+	case set["ramp"]:
+		p, err := stages.Ramp(ramp, d, float64(c))
+		if err != nil {
+			return nil, err
+		}
+		return &p, nil
+	}
+	return nil, nil
+}
+
 // createSeries opens the -series file before the run, so a bad path fails
 // before any load is sent. It returns nil for an empty path.
 func createSeries(path string) (*os.File, error) {
@@ -271,12 +317,28 @@ func writeSeries(f *os.File, write func(io.Writer) error) error {
 // startProgress redraws a one-line counter on stderr every half second and
 // returns a function that stops it and clears the line.
 func startProgress(r *loadtest.Runner, w io.Writer) (stop func()) {
-	return redraw(w, func() string { return progressLine(r.Progress()) })
+	plan := r.Config().Stages
+	return redraw(w, func() string { return progressLine(r.Progress(), plan) })
+}
+
+// liveTarget writes a stage target for the live line: whole for a level,
+// one decimal and /s for a rate.
+func liveTarget(plan *stages.Plan, t float64) string {
+	if plan.Kind == stages.Rate {
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", t), ".0") + "/s"
+	}
+	return fmt.Sprintf("%.0f", t)
 }
 
 // progressLine is the live line for single-URL mode: requests so far, the
-// rate in the last whole second, and errors so far.
-func progressLine(p loadtest.Progress) string {
+// rate in the last whole second, and errors so far. With stages it leads
+// with the stage, its target now and requests in flight.
+func progressLine(p loadtest.Progress, plan *stages.Plan) string {
+	if plan != nil {
+		return fmt.Sprintf("stage %d/%d  target %s  active %s  %s req/s  %s errors",
+			p.Stage, len(plan.Stages), liveTarget(plan, p.Target), report.GroupInt(p.Active),
+			report.GroupInt(int64(p.LastSecond.Requests)), report.GroupInt(p.Errors))
+	}
 	return fmt.Sprintf("%s requests, %s req/s last second, %s errors",
 		report.GroupInt(p.Completed), report.GroupInt(int64(p.LastSecond.Requests)), report.GroupInt(p.Errors))
 }

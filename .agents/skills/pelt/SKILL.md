@@ -25,8 +25,8 @@ per flow; see [User flows](#user-flows-pelt-run).
 - Start small and ramp up: a smoke test first, then raise `-c` and `-rate`
   step by step while watching errors and latency. Stop when errors appear or
   latency climbs sharply.
-- Prefer a time or request cap on every run (`-n` or `-d`). Never start an
-  unbounded run.
+- Prefer a time or request cap on every run (`-n`, `-d` or `-stages`).
+  Never start an unbounded run.
 - Requests with side effects (POST, PUT, DELETE) repeat thousands of times.
   Only send them to an endpoint where that is safe, such as a test database.
 - Flows usually write data (sign-ups, carts, orders) on every iteration. Run
@@ -72,7 +72,7 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-n` | 200 | Total requests. `0` = no limit (needs `-d`). |
+| `-n` | 200 | Total requests. `0` = no limit (needs `-d` or `-stages`). |
 | `-d` | off | Run for this long, e.g. `30s`. Without an explicit `-n`, runs for the full duration. With both, whichever comes first ends the run. |
 | `-c` | 50 | Concurrency: workers, i.e. max requests in flight. Capped at `-n`. |
 | `-rate` | 0 | Max requests/sec across all workers. `0` = unlimited. |
@@ -82,6 +82,8 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-body-file` | | Read the request body from a file. Not with `-body`. |
 | `-t` | 10s | Per-request timeout, including reading the body. |
 | `-o` | text | `text` or `json`. |
+| `-stages` | | Change the load over the run: `30s:200,2m:200,30s:0` moves concurrency, `1m:500/s,5m:500/s` moves the rate. Sets the run length. See [Load stages](#load-stages). |
+| `-ramp` | | Ramp concurrency from 0 to `-c` over this long, then hold for the rest of `-d`. |
 | `-series` | | Also write one row per second to this CSV file. |
 | `-http2` | false | Allow HTTP/2 over TLS (default forces HTTP/1.1). |
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
@@ -127,7 +129,40 @@ pelt -d 30s -c 100 -rate 500 -o json \
 
 Ramp-up pattern: run recipe 4 at increasing rates (for example 100, 500,
 1000, 2000) and stop at the first step where errors appear, 5xx grows, or p99
-jumps. The last good step is the capacity estimate.
+jumps. The last good step is the capacity estimate. Or do it in one run with
+load stages, below.
+
+## Load stages
+
+Stages change the load over one run, in straight lines between targets.
+Use them to find a breaking point in one run, to warm a cache before the
+part you care about, or to check that the service recovers when load drops.
+
+```sh
+# Concurrency: 0 → 200 in flight over 30s, hold 2m, back to 0
+pelt -stages 30s:200,2m:200,30s:0 -o json http://127.0.0.1:8080/
+
+# Rate: step up 100, 500, 1000 req/s, a minute each, at most 300 in flight
+pelt -stages 0s:100/s,1m:100/s,0s:500/s,1m:500/s,0s:1000/s,1m:1000/s -c 300 -o json http://127.0.0.1:8080/
+
+# Shorthand: ramp to -c over 30s, hold for the rest of -d
+pelt -ramp 30s -c 200 -d 3m -o json http://127.0.0.1:8080/
+```
+
+- A stage is `duration:target`, starting from 0; a `0s` stage jumps. A bare
+  number is requests in flight; `N/s` is requests per second. One kind per
+  list.
+- The stages set the run length: never add `-d`. Don't set `-c` with
+  concurrency stages or `-rate` with rate stages (all exit 2). With rate
+  stages, `-c` is a cap: keep it above rate × expected latency in seconds.
+- Thresholds still cover the whole run, ramps included.
+- JSON adds `stages_configured` and `stages` (per stage: `stage`, `name`,
+  `from`, `target`, `start_s`, `end_s`, `requests`, `responses`, `errors`,
+  `rps`, `p50_ms`, `p95_ms`, `p99_ms`), and fills `stage` and `target` in
+  every `series` row. To find the breaking point, read the series: the first
+  second where errors or `s5xx` start, or `p95` climbs well above the early
+  seconds, and report its `target`. If `rps` stays below `target` on a rate
+  stage, the target or `-c` is the limit, not the server.
 
 Never put real secrets on the command line in your reply; read them from an
 environment variable as in recipe 5.
@@ -327,13 +362,15 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   `t` (second), `active` (requests in flight at the end of the second),
   `requests`, `responses`, `errors`, `s2xx` to `s5xx`, `rps`, and `p50`,
   `p95`, `p99`, `max` in ms (`null` in a second with no responses).
-  `stage` and `target` are `null` for now. Flow mode adds `iterations`,
+  `stage` and `target` (the stage and its target mid-second) are `null`
+  without stages. Flow mode adds `iterations`,
   `aborted` and `check_fails`. `-series out.csv` writes the same columns.
 - Optional keys appear only when set: `duration_configured`, `rate_limit`,
-  `aborted`, `fail_reason`, `thresholds`.
+  `aborted`, `fail_reason`, `thresholds`, `stages_configured`, `stages`.
 
 The text output (`-o text`) shows the same numbers with labels `Requests:`,
-`Throughput:`, `Connections:`, `Latency`, `Histogram`, `Status codes:` and
+`Throughput:`, `Connections:`, `Latency`, `Histogram`, `Stages:` (with
+stages), `Timeline`, `Status codes:` and
 `Errors:`, then `Thresholds:` and a `Result: PASS` or `Result: FAIL (...)`
 line when there are thresholds or the run failed. With `-o json`, a failing
 run also prints `pelt: FAIL: ...` to stderr.
@@ -344,7 +381,7 @@ run also prints `pelt: FAIL: ...` to stderr.
 |------|---------|
 | `0` | Finished; every threshold passed (or none were set) |
 | `1` | Other failure, for example an unreadable `-body-file` |
-| `2` | Bad flags, config or threshold; nothing was sent |
+| `2` | Bad flags, config, stages or threshold; nothing was sent |
 | `3` | A threshold was missed, or no request got a response (flow mode: no iteration completed) |
 | `130` | Interrupted (report still printed), even if a threshold failed |
 
@@ -389,7 +426,7 @@ the same in a Timeline block of at most 20 rows.
 
 Give the command you ran, then: requests per second, p50/p95/p99, error rate,
 non-2xx status counts, and connections opened vs reused. Say what load you
-used (`-c`, `-rate`, `-n` or `-d`). Note that results from the same machine
+used (`-c`, `-rate`, `-n`, `-d` or `-stages`). Note that results from the same machine
 as the server mostly measure that machine; for a real benchmark run Pelt on a
 separate host.
 

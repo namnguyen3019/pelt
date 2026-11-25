@@ -3,12 +3,26 @@ package loadtest
 import (
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
+
+// mustStages parses a -stages string or fails the test.
+func mustStages(t *testing.T, s string) *stages.Plan {
+	t.Helper()
+	p, err := stages.Parse(s)
+	if err != nil {
+		t.Fatalf("stages.Parse(%q): %v", s, err)
+	}
+	return &p
+}
 
 // newRunner is a test helper that fails the test on a config error.
 func newRunner(t *testing.T, cfg Config) *Runner {
@@ -256,6 +270,9 @@ func TestValidate(t *testing.T) {
 		{"zero concurrency", Config{URL: "http://x", Requests: 1, Timeout: time.Second}, true},
 		{"negative rate", Config{URL: "http://x", Requests: 1, Concurrency: 1, Timeout: time.Second, RateLimit: -1}, true},
 		{"no timeout", Config{URL: "http://x", Requests: 1, Concurrency: 1}, true},
+		{"stages alone", Config{URL: "http://x", Timeout: time.Second, Stages: mustStages(t, "1s:5")}, false},
+		{"stages and duration", Config{URL: "http://x", Duration: time.Second, Timeout: time.Second, Stages: mustStages(t, "1s:5")}, true},
+		{"rate stages and rate", Config{URL: "http://x", Concurrency: 5, RateLimit: 9, Timeout: time.Second, Stages: mustStages(t, "1s:5/s")}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -265,8 +282,14 @@ func TestValidate(t *testing.T) {
 		})
 	}
 
+	// Level stages start as many workers as their highest target.
+	cfg := Config{URL: "http://x", Concurrency: 2, Timeout: time.Second, Stages: mustStages(t, "1s:5,1s:12,1s:0")}
+	if err := cfg.Validate(); err != nil || cfg.Concurrency != 12 {
+		t.Errorf("level stages: concurrency=%d err=%v, want 12", cfg.Concurrency, err)
+	}
+
 	// Workers are capped at the number of requests.
-	cfg := Config{URL: "http://x", Requests: 3, Concurrency: 100, Timeout: time.Second}
+	cfg = Config{URL: "http://x", Requests: 3, Concurrency: 100, Timeout: time.Second}
 	if err := cfg.Validate(); err != nil || cfg.Concurrency != 3 || cfg.Method != "GET" {
 		t.Errorf("after Validate: concurrency=%d method=%q err=%v, want 3, GET, nil", cfg.Concurrency, cfg.Method, err)
 	}
@@ -305,5 +328,82 @@ func TestSeriesAddsUpToTotals(t *testing.T) {
 	}
 	if len(res.Series.Levels) != 2 || res.Series.Levels[0].Active > 4 {
 		t.Errorf("levels = %+v, want 2 with at most 4 in flight", res.Series.Levels)
+	}
+}
+
+func TestLevelStagesFollowTarget(t *testing.T) {
+	plan := mustStages(t, "1s:20,1s:20,1s:0")
+	var mu sync.Mutex
+	type seen struct {
+		at time.Duration
+		n  int64
+	}
+	var log []seen
+	var inFlight atomic.Int64
+	var start time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		mu.Lock()
+		log = append(log, seen{time.Since(start), n})
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	r := newRunner(t, Config{URL: srv.URL, Stages: plan})
+	start = time.Now()
+	res := r.Run(context.Background())
+
+	if res.Elapsed < 2900*time.Millisecond || res.Elapsed > 3500*time.Millisecond {
+		t.Errorf("elapsed %v, want about the 3s the stages add up to", res.Elapsed)
+	}
+	peak := int64(0)
+	for _, s := range log {
+		// The gate reads the target when it sends; allow for the time since
+		// then on a ramp-down, and one tick of the controller.
+		limit := math.Round(max(plan.Target(s.at), plan.Target(s.at-300*time.Millisecond)))
+		if float64(s.n) > limit+1 {
+			t.Errorf("%d in flight at %v, target %v", s.n, s.at, limit)
+			break
+		}
+		peak = max(peak, s.n)
+	}
+	if peak < 15 {
+		t.Errorf("peak in flight %d, want close to 20", peak)
+	}
+	if !res.Series.Staged || len(res.Series.Levels) < 3 {
+		t.Fatalf("series staged=%v levels=%+v", res.Series.Staged, res.Series.Levels)
+	}
+	if lv := res.Series.Levels[1]; lv.Stage != 2 || lv.Target != 20 {
+		t.Errorf("second 1: %+v, want stage 2, target 20", lv)
+	}
+	if lv := res.Series.Levels[len(res.Series.Levels)-1]; lv.Active != 0 || lv.Stage != 3 {
+		t.Errorf("last level %+v, want none in flight in stage 3", lv)
+	}
+}
+
+func TestRateStagesSendTheArea(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+
+	// 0 → 100/s over 2s asks for 100 requests in all.
+	res := newRunner(t, Config{URL: srv.URL, Concurrency: 10, Stages: mustStages(t, "2s:100/s")}).
+		Run(context.Background())
+	if res.Total < 95 || res.Total > 101 {
+		t.Errorf("sent %d requests, want about 100", res.Total)
+	}
+	if c := res.Series.Counts; len(c) < 2 || c[0].Requests > c[1].Requests {
+		t.Errorf("a rising rate should send more in second 1 than second 0: %+v", c)
+	}
+}
+
+func TestStagesStopEarlyAtRequestCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	res := newRunner(t, Config{URL: srv.URL, Requests: 30, Stages: mustStages(t, "0s:5,10s:5")}).
+		Run(context.Background())
+	if res.Total != 30 || res.Elapsed > 2*time.Second {
+		t.Errorf("sent %d in %v, want 30 well before the 10s stages end", res.Total, res.Elapsed)
 	}
 }
