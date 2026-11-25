@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -208,7 +209,7 @@ func TestDryRunIgnoresStages(t *testing.T) {
 	sc := load(t, `{"base_url": "BASE", "load": {"stages": [{"duration": "1h", "users": 50}]},
 	  "flows": [{"name": "f", "steps": [{"name": "a", "url": "/a"}]}]}`, srv.URL)
 	var out strings.Builder
-	if !DryRun(t.Context(), sc, sc.Options(), &out) || !strings.Contains(out.String(), "1 user") {
+	if !DryRun(context.Background(), sc, sc.Options(), &out) || !strings.Contains(out.String(), "1 user") {
 		t.Errorf("dry run failed:\n%s", out.String())
 	}
 }
