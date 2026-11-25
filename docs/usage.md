@@ -238,7 +238,10 @@ Timeline (1 second per row):
 
 A 10-minute run gets 20 rows of 30 seconds. `p95` in a row is over every
 response in that slice, not an average of seconds. Shorter runs print no
-Timeline, so a quick `pelt <url>` looks as it always has.
+Timeline, so a quick `pelt <url>` looks as it always has. A run is timed
+until its last request ends, so a `-d 20s` run lasts a little longer, such
+as 20.004s; the Timeline folds a last part-second shorter than half a second
+into the row before it, so those few ms don't show as a row of their own.
 
 **In JSON**, `-o json` adds a `series` array with one object per second:
 
