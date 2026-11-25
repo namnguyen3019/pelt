@@ -449,44 +449,44 @@ same machine:
 $ pelt run examples/shop.json -u 50 -d 20s -seed 7
 Scenario:     shop (examples/shop.json)
 Load:         50 users, for 20s, seed 7
-Elapsed:      20s
+Elapsed:      20.006s
 
-Iterations:   726 started: 692 completed, 3 aborted, 31 cut by the end of the run (36.3/sec)
-Requests:     1908 completed, 1908 responses, 0 errors (0.00%), 3 failed checks
-Throughput:   95.4 requests/sec, 31.6 KiB/sec read
-Connections:  50 opened, 1858 requests reused a connection
+Iterations:   728 started: 693 completed, 4 aborted, 31 cut by the end of the run (36.4/sec)
+Requests:     1914 completed, 1914 responses, 0 errors (0.00%), 4 failed checks
+Throughput:   95.7 requests/sec, 31.7 KiB/sec read
+Connections:  50 opened, 1864 requests reused a connection
 
 Flow      weight  started     done  aborted    cut    flow p50    flow p95    flow p99    wall p50
-browse         7      499      476        2     21      13.651      18.877      20.498    1198.588
-checkout       3      227      216        1     10      27.056      33.684      37.155    1771.110
+browse         7      499      475        2     22      13.550      18.891      20.662    1192.533
+checkout       3      229      218        2      9      26.918      34.467      35.981    1762.387
   (times in ms; flow time is request time only, wall time includes think time)
 
 Step                         reqs  errors  failed        p50        p90        p95        p99        max
-setup / login                  50       0       0      7.449     10.458     10.707     11.698     11.698
-browse / list products        499       0       1      6.706     10.276     10.617     11.052     11.295
-browse / view product         477       0       1      6.691      9.969     10.427     10.833     11.266
-checkout / list products      227       0       0      6.584     10.074     10.557     10.895     11.145
-checkout / add to cart        222       0       0      6.848      9.960     10.401     10.806     11.310
-checkout / checkout           217       0       1      6.580      9.710     10.218     10.806     11.151
-checkout / order status       216       0       0      6.620      9.740     10.558     10.725     11.146
+setup / login                  50       0       0      8.000     10.765     11.930     12.995     12.995
+browse / list products        499       0       1      6.565      9.920     10.480     10.948     11.084
+browse / view product         476       0       1      6.705     10.070     10.524     10.790     11.320
+checkout / list products      229       0       0      6.911      9.933     10.702     10.990     11.148
+checkout / add to cart        224       0       2      6.466     10.050     10.643     10.966     10.974
+checkout / checkout           218       0       0      6.882      9.977     10.584     11.006     11.115
+checkout / order status       218       0       0      6.598      9.873     10.359     10.800     10.898
   (times in ms; failed = status check or capture failed)
 
 Aborted at step:
        1  browse / list products
        1  browse / view product
-       1  checkout / checkout
+       2  checkout / add to cart
 
-Timeline (2 seconds per row):
-  time    req/s   iter/s  p95 ms  errors  failed
-  0-2s      104     13.5  10.684       0       1
-  2-4s       96     37.5  10.536       0       0
-  4-6s       96     35.0  10.402       0       0
+Timeline (1 second per row):
+  time    req/s  iter/s  p95 ms  errors  failed
+  0-1s      111     0.0  11.044       0       0
+  1-2s       96    27.0  10.749       0       0
+  2-3s       98    35.0  10.293       0       0
   ...
 
 Status codes:
-  200  1689
-  201  216
-  500  3
+  200  1692
+  201  218
+  500  4
 ```
 
 - **Iterations**: every started iteration ends as completed, aborted (a
@@ -499,9 +499,8 @@ Status codes:
   Percentiles are over responses. `list products` in `browse` and in
   `checkout` are separate rows.
 - **Aborted at step** shows where failures cut iterations short. Here the
-  three injected 500s each stopped one iteration.
-- **Timeline** shows the run second by second (here 2 seconds per row, as
-  the run is a little over 20 seconds); see
+  four injected 500s each stopped one iteration.
+- **Timeline** shows the run second by second; see
   [Per-second results](#per-second-results).
 
 With no think time, the same shop on the same machine served about 37,800
