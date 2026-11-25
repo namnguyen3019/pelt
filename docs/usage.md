@@ -2,6 +2,9 @@
 
 [Back to README](../README.md)
 
+This page covers single-URL mode, `pelt [flags] <url>`. For scripted user
+journeys with `pelt run <file>`, see [flows.md](flows.md).
+
 ## Try it locally
 
 From a clone of this repository:

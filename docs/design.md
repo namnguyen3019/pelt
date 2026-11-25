@@ -84,6 +84,8 @@ if the pooled connection wins, the dial still completes and is kept for later.
 cmd/pelt/            CLI: flags, signal handling, progress line, output
 cmd/testserver/      local target with configurable delay and error rate
 internal/loadtest/   Config, tuned Transport, dispatcher + worker pool, Result
+internal/flow/       flow mode: scenario file, templates, captures, virtual users
+internal/testshop/   the small shop that testserver -app shop serves
 internal/stats/      percentiles, mean/stddev, histogram (pure functions)
 internal/report/     text and JSON rendering
 ```
@@ -106,10 +108,22 @@ go test -race ./...
 - `internal/report`: text and JSON output.
 - `cmd/pelt`: end-to-end run of the CLI against a local server, and bad
   flag handling.
+- `internal/flow`: scenario parsing and errors, templates and escaping,
+  captures, weighted flow picks, and runs against the test shop: per-user
+  cookies, chained captures, abort vs `on_fail: continue`, setup retries,
+  duration and Ctrl-C cut-off, and the dry run.
+- `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run, and
+  bad files and flags.
+
+Flow mode shares the tuned transport with single-URL mode. Each virtual user
+gets its own `http.Client` and cookie jar on top of it and writes to its own
+recorder, which are merged after the run, so the hot path takes no locks.
+See [flows.md](flows.md#how-the-users-run).
 
 ## Ideas for later
 
 - Open-loop mode that corrects for coordinated omission
 - HDR histogram for constant memory on very long runs
 - Per-second time series in the JSON output
-- Ramp-up of workers over time
+- Ramp-up of workers over time (both modes)
+- Flow mode: a target-rate (open) model and pass/fail thresholds for CI

@@ -10,6 +10,9 @@ library only.
   and a rate cap (`-rate`); any method, headers and body; HTTP/2 with `-http2`.
 - **Script friendly:** JSON output (`-o json`), exit codes, and Ctrl-C still
   prints a report.
+- **User flows:** `pelt run shop.json` runs virtual users through scripted
+  journeys (log in, browse, check out) with cookies, captured values and a
+  report per step.
 
 ## Install
 
@@ -48,17 +51,30 @@ Latency (successful requests):
 Only point it at servers you own or have permission to test. All flags,
 examples, the full output and how to read it: [docs/usage.md](docs/usage.md).
 
+For multi-step journeys, describe them in a JSON file and run it:
+
+```sh
+pelt run examples/shop.json -u 50 -d 1m
+```
+
+Each virtual user logs in once, keeps its own cookies, and loops through
+weighted flows, carrying values such as a token or an order id from one
+request to the next. The file format, captures and report:
+[docs/flows.md](docs/flows.md).
+
 ## Pelt vs Locust
 
 | | Pelt | Locust |
 |---|---|---|
 | Install | One binary | `pip install locust` |
-| Test defined by | CLI flags, one endpoint | Python code, user journeys |
+| Test defined by | CLI flags for one endpoint, or a JSON file of user flows | Python code, user journeys |
 | Interface | Terminal, text or JSON | Web UI, or headless |
 | Scale out | One process, all cores | Master/worker across machines |
 
-Use Pelt to hammer one endpoint fast from a terminal or CI; use Locust for
-scripted user flows. More in [docs/comparison.md](docs/comparison.md).
+Use Pelt to hammer one endpoint fast, or to run straightforward user flows
+from a JSON file, from a terminal or CI; use Locust when a journey needs real
+code (branches, loops, libraries) or a web UI. More in
+[docs/comparison.md](docs/comparison.md).
 
 ## More
 
