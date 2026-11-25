@@ -12,6 +12,7 @@ import (
 	"github.com/namnguyen3019/pelt/internal/flow"
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/stats"
+	"github.com/namnguyen3019/pelt/internal/threshold"
 )
 
 // stepPercentiles and flowPercentiles are the columns of the two tables.
@@ -28,6 +29,12 @@ type FlowReport struct {
 	flows   []stats.Summary // flow time, by flow id
 	walls   []stats.Summary // wall time, by flow id
 	verdict Verdict
+
+	// all holds every response latency, sorted, for run-level latency
+	// thresholds. It is built on first use.
+	all     []time.Duration
+	allSum  stats.Summary
+	allDone bool
 }
 
 // NewFlow computes statistics for res. Like New, it sorts the latency
@@ -41,18 +48,109 @@ func NewFlow(res *flow.Result) *FlowReport {
 		r.flows = append(r.flows, stats.Summarize(res.Flows[i].FlowTimes, flowPercentiles))
 		r.walls = append(r.walls, stats.Summarize(res.Flows[i].WallTimes, flowPercentiles))
 	}
-	// Thresholds in flow mode come in a later version; for now only the
-	// built-in rule applies: a run in which no iteration completed fails.
-	reason := ""
-	if _, completed, _, _ := res.Iterations(); completed == 0 {
-		reason = "no iteration completed"
-	}
-	r.verdict = newVerdict(nil, reason)
+	r.Check(nil)
 	return r
 }
 
-// Verdict says whether the run passed.
+// Check evaluates thresholds against the run, keeps the verdict for the
+// text and JSON output, and returns it. With no thresholds the verdict
+// still fails a run in which no iteration completed.
+func (r *FlowReport) Check(ts []flow.Target) Verdict {
+	outcomes := make([]threshold.Outcome, 0, len(ts))
+	for _, t := range ts {
+		outcomes = append(outcomes, threshold.Check(t.Threshold, r.measure(t)))
+	}
+	reason := ""
+	if _, completed, _, _ := r.res.Iterations(); completed == 0 {
+		reason = "no iteration completed"
+	}
+	r.verdict = newVerdict(outcomes, reason)
+	return r.verdict
+}
+
+// Verdict returns the result of the last Check.
 func (r *FlowReport) Verdict() Verdict { return r.verdict }
+
+// measure finds a threshold's metric at its level: the whole run, a flow
+// or a step. Rates are a share of completed requests, or of started
+// iterations for aborted.
+func (r *FlowReport) measure(t flow.Target) threshold.Measured {
+	res, tot := r.res, r.totals
+	secs := max(res.Elapsed.Seconds(), 1e-9)
+	perSec := func(n int) threshold.Measured {
+		if n == 0 {
+			return threshold.Measured{NoSamples: true}
+		}
+		return threshold.Measured{Value: float64(n) / secs}
+	}
+	switch t.Level() {
+	case "flow":
+		f := &res.Flows[t.FlowID]
+		switch {
+		case strings.HasPrefix(t.Metric, "wall_p"):
+			return latency(t.Threshold, f.WallTimes, r.walls[t.FlowID])
+		case t.Kind == threshold.Latency:
+			return latency(t.Threshold, f.FlowTimes, r.flows[t.FlowID])
+		case t.Metric == "aborted":
+			return rate(t.Threshold, f.Aborted, f.Started)
+		case t.Metric == "ips":
+			return perSec(f.Started)
+		}
+	case "step":
+		s := &res.Steps[t.StepID]
+		switch {
+		case t.Kind == threshold.Latency:
+			return latency(t.Threshold, s.Latencies, r.steps[t.StepID])
+		case t.Metric == "errors":
+			return rate(t.Threshold, s.ErrorCount(), s.Requests)
+		case t.StatusLow > 0:
+			return rate(t.Threshold, statusCount(s.StatusCodes, t.StatusLow, t.StatusHigh), s.Requests)
+		case t.Metric == "checks":
+			return rate(t.Threshold, s.CheckFails, s.Requests)
+		case t.Metric == "rps":
+			return perSec(s.Requests)
+		case t.Metric == "requests":
+			return threshold.Measured{Value: float64(s.Requests)}
+		}
+	default:
+		started, _, aborted, _ := res.Iterations()
+		switch {
+		case t.Kind == threshold.Latency:
+			r.allLatencies()
+			return latency(t.Threshold, r.all, r.allSum)
+		case t.Metric == "errors":
+			return rate(t.Threshold, tot.ErrorCount(), tot.Total)
+		case t.StatusLow > 0:
+			return rate(t.Threshold, statusCount(tot.StatusCodes, t.StatusLow, t.StatusHigh), tot.Total)
+		case t.Metric == "checks":
+			return rate(t.Threshold, res.CheckFails(), tot.Total)
+		case t.Metric == "rps":
+			return perSec(tot.Total)
+		case t.Metric == "requests":
+			return threshold.Measured{Value: float64(tot.Total)}
+		case t.Metric == "aborted":
+			return rate(t.Threshold, aborted, started)
+		case t.Metric == "ips":
+			return perSec(started)
+		case t.Metric == "setup_failed":
+			return threshold.Measured{Value: float64(res.SetupFailedVUs)}
+		}
+	}
+	// flow.ResolveThreshold rejects a metric that a level does not have.
+	return threshold.Measured{NoSamples: true}
+}
+
+// allLatencies gathers every response latency across steps, once.
+func (r *FlowReport) allLatencies() {
+	if r.allDone {
+		return
+	}
+	for i := range r.res.Steps {
+		r.all = append(r.all, r.res.Steps[i].Latencies...)
+	}
+	r.allSum = stats.Summarize(r.all, nil) // sorts r.all
+	r.allDone = true
+}
 
 func stepLabel(st *flow.Step) string { return st.Flow + " / " + st.Name }
 
@@ -198,32 +296,33 @@ func pct(s stats.Summary, i int) string {
 // --- JSON ---
 
 type jsonFlowReport struct {
-	Mode           string         `json:"mode"`
-	Scenario       string         `json:"scenario"`
-	File           string         `json:"file,omitempty"`
-	Users          int            `json:"users"`
-	Duration       string         `json:"duration_configured,omitempty"`
-	Iterations     int            `json:"iterations_configured,omitempty"`
-	Seed           uint64         `json:"seed"`
-	Interrupted    bool           `json:"interrupted"`
-	Passed         bool           `json:"passed"`
-	FailReason     string         `json:"fail_reason,omitempty"`
-	ElapsedMS      float64        `json:"elapsed_ms"`
-	Iters          jsonIterations `json:"iterations"`
-	SetupFailed    int            `json:"setup_failed_users"`
-	Total          int            `json:"total"`
-	Successes      int            `json:"responses"`
-	Errors         int            `json:"errors"`
-	CheckFails     int            `json:"failed_checks"`
-	Aborted        int            `json:"aborted,omitempty"`
-	RPS            float64        `json:"requests_per_sec"`
-	BytesRead      int64          `json:"bytes_read"`
-	ConnsNew       int64          `json:"connections_opened"`
-	ConnsReused    int64          `json:"connections_reused"`
-	StatusCodes    map[string]int `json:"status_codes"`
-	ErrorBreakdown map[string]int `json:"error_breakdown"`
-	Flows          []jsonFlow     `json:"flows"`
-	Steps          []jsonStep     `json:"steps"`
+	Mode           string          `json:"mode"`
+	Scenario       string          `json:"scenario"`
+	File           string          `json:"file,omitempty"`
+	Users          int             `json:"users"`
+	Duration       string          `json:"duration_configured,omitempty"`
+	Iterations     int             `json:"iterations_configured,omitempty"`
+	Seed           uint64          `json:"seed"`
+	Interrupted    bool            `json:"interrupted"`
+	Passed         bool            `json:"passed"`
+	FailReason     string          `json:"fail_reason,omitempty"`
+	ElapsedMS      float64         `json:"elapsed_ms"`
+	Iters          jsonIterations  `json:"iterations"`
+	SetupFailed    int             `json:"setup_failed_users"`
+	Total          int             `json:"total"`
+	Successes      int             `json:"responses"`
+	Errors         int             `json:"errors"`
+	CheckFails     int             `json:"failed_checks"`
+	Aborted        int             `json:"aborted,omitempty"`
+	RPS            float64         `json:"requests_per_sec"`
+	BytesRead      int64           `json:"bytes_read"`
+	ConnsNew       int64           `json:"connections_opened"`
+	ConnsReused    int64           `json:"connections_reused"`
+	StatusCodes    map[string]int  `json:"status_codes"`
+	ErrorBreakdown map[string]int  `json:"error_breakdown"`
+	Flows          []jsonFlow      `json:"flows"`
+	Steps          []jsonStep      `json:"steps"`
+	Thresholds     []jsonThreshold `json:"thresholds,omitempty"`
 }
 
 type jsonIterations struct {
@@ -311,6 +410,7 @@ func (r *FlowReport) WriteJSON(w io.Writer) error {
 		ErrorBreakdown: tot.Errors,
 		Flows:          []jsonFlow{},
 		Steps:          []jsonStep{},
+		Thresholds:     toJSONThresholds(r.verdict),
 	}
 	if opts.Duration > 0 {
 		out.Duration = opts.Duration.String()

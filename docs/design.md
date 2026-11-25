@@ -114,17 +114,21 @@ go test -race ./...
 - `cmd/pelt`: end-to-end run of the CLI against a local server, exit code 3
   for a missed threshold and for a dead target, and bad flag and threshold
   handling.
-- `internal/flow`: scenario parsing and errors, templates and escaping,
-  captures, weighted flow picks, and runs against the test shop: per-user
+- `internal/flow`: scenario parsing and errors, `thresholds` lists at every
+  level and their scopes (with the line and column of a bad entry), templates
+  and escaping, captures, weighted flow picks, and runs against the test shop: per-user
   cookies, chained captures, abort vs `on_fail: continue`, setup retries,
   duration and Ctrl-C cut-off, and the dry run.
-- `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run, and
-  bad files and flags.
+- `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run,
+  exit 3 and 0 for thresholds from the file and the command line,
+  `-no-thresholds`, and bad files, flags and threshold scopes.
 
 Thresholds are checked once, after the run, against the same numbers the
 report prints. `internal/threshold` only parses and compares; the report
-package measures each metric, which keeps the parser free of run types and
-lets flow mode reuse it for per-step targets later.
+package measures each metric, which keeps the parser free of run types. In
+flow mode `internal/flow` ties each threshold to the run, a flow or a step
+(and rejects a metric that level does not have), and the report measures it
+there.
 
 Flow mode shares the tuned transport with single-URL mode. Each virtual user
 gets its own `http.Client` and cookie jar on top of it and writes to its own
@@ -137,4 +141,5 @@ See [flows.md](flows.md#how-the-users-run).
 - HDR histogram for constant memory on very long runs
 - Per-second time series in the JSON output
 - Ramp-up of workers over time (both modes)
-- Flow mode: a target-rate (open) model and pass/fail thresholds for CI
+- Flow mode: a target-rate (open) model
+- Stopping a run early when a threshold is clearly missed

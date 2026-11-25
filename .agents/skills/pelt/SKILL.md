@@ -133,10 +133,11 @@ environment variable as in recipe 5.
 
 ## Thresholds (pass/fail)
 
-`-threshold 'metric op value'` (repeatable, single-URL mode only) makes the
-run exit 3 when a target is missed. Quote each one so the shell leaves `<`
-and `>` alone. `-threshold` is on the main branch; if `pelt -h` does not list
-it, install from main as in [User flows](#user-flows-pelt-run).
+`-threshold 'metric op value'` (repeatable, both modes) makes the run exit 3
+when a target is missed. Quote each one so the shell leaves `<` and `>`
+alone. Single-URL `-threshold` is in v0.3.0; flow thresholds are on the main
+branch. If `pelt -h` or `pelt run -h` does not list `-threshold`, install
+from main as in [User flows](#user-flows-pelt-run).
 
 | Metric | Value |
 |--------|-------|
@@ -155,6 +156,27 @@ expression exits 2 before any load is sent.
   and report the numbers.
 - When a run exits 3, read `thresholds[]` in the JSON and report each failed
   one with its `actual` against `target`.
+
+In flow mode, thresholds can also sit in the scenario file as a
+`thresholds` list at the top level (whole run), on a flow, or on a step;
+where the list sits is its scope. On the command line a scope names it:
+`checkout: p95<800ms` (a flow), `checkout/pay: errors<1%` (a step),
+`setup/login: p99<1s` (a setup step). `-threshold` adds to the file's list;
+`-no-thresholds` skips the file's list. Extra flow metrics:
+
+| Metric | Measures | Where |
+|--------|----------|-------|
+| `checks` | Failed checks and captures, `%` of requests or a count | run, step |
+| `aborted` | Iterations stopped by a failure, `%` of started or a count | run, flow |
+| `ips` | Iterations started per second | run, flow |
+| `wall_pN` | Iteration time with think time | flow |
+| `setup_failed` | Users that gave up on setup (count) | run |
+
+`pN`, `mean` and `max` work everywhere (on a flow: request time of
+completed iterations); `errors`, `status:...`, `rps` and `requests` work for
+the run or a step. A metric at the wrong level, or a scope that names no
+flow or step, exits 2 before any load is sent. `checks<=0` is how to make
+failed checks fail the run.
 
 ## User flows: `pelt run`
 
@@ -211,7 +233,8 @@ A minimal scenario:
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
 total iterations, `-t` timeout, `-base` base URL, `-seed`, `-o json`,
-`-quiet`, `-http2`, `-dry-run`. They may go before or after the file.
+`-quiet`, `-http2`, `-dry-run`, plus `-threshold` (repeatable) and
+`-no-thresholds`. They may go before or after the file.
 
 ```sh
 # 1. Always first: one user, setup and each flow once, every request printed.
@@ -225,6 +248,10 @@ pelt run scenario.json -u 5 -d 30s -o json
 pelt run scenario.json -u 20 -d 1m -o json \
   | jq '{iterations, failed_checks, errors, status_codes,
          steps: [.steps[] | {flow, name, failed_checks, p95: .latency_ms.percentiles.p95}]}'
+
+# 4. Gate CI on targets the user gave: exit 3 if any is missed
+pelt run scenario.json -u 20 -d 1m -o json \
+  -threshold 'checks<=0' -threshold 'checkout/pay: p95<500ms' > pelt.json
 ```
 
 JSON has `"mode": "flow"`, the same top-level totals as single-URL mode,
@@ -233,10 +260,10 @@ plus `iterations` (`started`, `completed`, `aborted`, `cut`, `per_sec`),
 `flow_time_ms` = request time only, `wall_time_ms` = with think time) and
 `steps[]` (per step: `requests`, `errors`, `failed_checks`, `latency_ms`,
 `status_codes`). A run is healthy only if `failed_checks`, `errors` and
-`setup_failed_users` are 0 and `iterations.aborted` is small; exit code 0 does
-not mean that. Exit 3 (`"passed": false`, `fail_reason`
-`"no iteration completed"`) means no iteration finished at all. Flow mode
-does not take `-threshold` yet. `cut` iterations were stopped by the end of the run, not
+`setup_failed_users` are 0 and `iterations.aborted` is small; without thresholds, exit code 0 does
+not mean that. Exit 3 (`"passed": false`) means a threshold was missed, or
+no iteration finished at all (`fail_reason` `"no iteration completed"`).
+`cut` iterations were stopped by the end of the run, not
 failures. Full reference: `docs/flows.md` in the repository.
 
 To practise locally: `testserver -app shop -addr 127.0.0.1:8080` serves a
@@ -289,8 +316,9 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
 - `passed`: `false` when a threshold was missed or no request got a
   response; always present. `fail_reason` says `"no request got a response"`
   when that rule failed the run.
-- `thresholds` (only with `-threshold`): one object per threshold, failures
-  first: `expr`, `metric`, `op`, `target`, `actual` (`null` with
+- `thresholds` (only with thresholds set): one object per threshold, failures
+  first: `scope` (`run`, `flow` or `step`, with `flow` and `step` naming it
+  in flow mode), `expr`, `metric`, `op`, `target`, `actual` (`null` with
   `no_samples`), `unit` (`ms`, `%`, `count`, `per_sec`), `count` and `of` for
   rates, and `pass`.
 - Optional keys appear only when set: `duration_configured`, `rate_limit`,

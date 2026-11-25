@@ -162,7 +162,9 @@ func latency(t threshold.Threshold, sorted []time.Duration, s stats.Summary) thr
 
 // JSON form of a threshold outcome.
 type jsonThreshold struct {
-	Scope     string   `json:"scope"`
+	Scope     string   `json:"scope"` // run, flow or step
+	Flow      string   `json:"flow,omitempty"`
+	Step      string   `json:"step,omitempty"`
 	Expr      string   `json:"expr"`
 	Metric    string   `json:"metric"`
 	Op        string   `json:"op"`
@@ -179,11 +181,9 @@ func toJSONThresholds(v Verdict) []jsonThreshold {
 	var out []jsonThreshold
 	for _, o := range v.Outcomes {
 		jt := jsonThreshold{
-			Scope: "run", Expr: o.Expr, Metric: o.Metric, Op: string(o.Op),
+			Scope: o.Level(), Flow: o.Threshold.Flow, Step: o.Threshold.Step,
+			Expr: o.Expr, Metric: o.Metric, Op: string(o.Op),
 			Target: o.Threshold.Value, NoSamples: o.NoSamples, Pass: o.Pass,
-		}
-		if o.Scope != "" {
-			jt.Scope = o.Scope
 		}
 		switch o.Unit {
 		case threshold.UnitMS:

@@ -122,9 +122,10 @@ In GitHub Actions:
     path: pelt.json
 ```
 
-Thresholds are evaluated when the run ends. Flow mode (`pelt run`) does not
-take `-threshold` yet; it gets thresholds per flow and per step in a later
-version.
+Thresholds are evaluated when the run ends. Flow mode (`pelt run`) takes
+the same `-threshold` flag, plus `thresholds` lists in the scenario file per
+flow and per step, and metrics for checks and iterations; see
+[flow thresholds](flows.md#thresholds).
 
 ## Exit codes
 
@@ -133,7 +134,7 @@ version.
 | `0` | Finished, and every threshold passed |
 | `1` | Runtime error, for example an unreadable `-body-file` |
 | `2` | Bad flags, config or threshold; nothing was sent |
-| `3` | A threshold was missed, or no request got a response |
+| `3` | A threshold was missed, or no request got a response (in flow mode, no iteration completed) |
 | `130` | Interrupted with Ctrl-C (report still printed, thresholds still shown) |
 
 An interrupted run exits `130` even when a threshold failed, because the

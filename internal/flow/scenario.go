@@ -35,6 +35,10 @@ type Scenario struct {
 	Setup   []*Step
 	Flows   []*Flow
 	Steps   []*Step // every step, setup first; Steps[i].ID == i
+
+	// Thresholds are the file's pass/fail targets: the top-level list,
+	// then setup steps, then each flow followed by its steps.
+	Thresholds []Target
 }
 
 // Load holds the run settings from the file's load block. Command-line
@@ -84,14 +88,15 @@ type Think struct{ Min, Max time.Duration }
 // --- file model ---
 
 type fileScenario struct {
-	Name     string           `json:"name"`
-	BaseURL  string           `json:"base_url"`
-	Load     fileLoad         `json:"load"`
-	Defaults fileDefaults     `json:"defaults"`
-	Vars     map[string]value `json:"vars"`
-	Data     *fileData        `json:"data"`
-	Setup    []fileStep       `json:"setup"`
-	Flows    []fileFlow       `json:"flows"`
+	Name       string           `json:"name"`
+	BaseURL    string           `json:"base_url"`
+	Load       fileLoad         `json:"load"`
+	Defaults   fileDefaults     `json:"defaults"`
+	Vars       map[string]value `json:"vars"`
+	Data       *fileData        `json:"data"`
+	Setup      []fileStep       `json:"setup"`
+	Flows      []fileFlow       `json:"flows"`
+	Thresholds []string         `json:"thresholds"`
 }
 
 type fileLoad struct {
@@ -113,23 +118,25 @@ type fileData struct {
 }
 
 type fileFlow struct {
-	Name   string     `json:"name"`
-	Weight int        `json:"weight"`
-	Steps  []fileStep `json:"steps"`
+	Name       string     `json:"name"`
+	Weight     int        `json:"weight"`
+	Steps      []fileStep `json:"steps"`
+	Thresholds []string   `json:"thresholds"`
 }
 
 type fileStep struct {
-	Name     string            `json:"name"`
-	Method   string            `json:"method"`
-	URL      string            `json:"url"`
-	Headers  map[string]string `json:"headers"`
-	Body     *string           `json:"body"`
-	BodyFile string            `json:"body_file"`
-	JSON     json.RawMessage   `json:"json"`
-	Check    *fileCheck        `json:"check"`
-	Capture  []fileCapture     `json:"capture"`
-	Think    *string           `json:"think"`
-	OnFail   string            `json:"on_fail"`
+	Name       string            `json:"name"`
+	Method     string            `json:"method"`
+	URL        string            `json:"url"`
+	Headers    map[string]string `json:"headers"`
+	Body       *string           `json:"body"`
+	BodyFile   string            `json:"body_file"`
+	JSON       json.RawMessage   `json:"json"`
+	Check      *fileCheck        `json:"check"`
+	Capture    []fileCapture     `json:"capture"`
+	Think      *string           `json:"think"`
+	OnFail     string            `json:"on_fail"`
+	Thresholds []string          `json:"thresholds"`
 }
 
 type fileCheck struct {
@@ -208,7 +215,7 @@ func Parse(raw []byte, dir, baseURL string) (*Scenario, error) {
 	if baseURL != "" {
 		f.BaseURL = baseURL
 	}
-	return compile(&f, dir)
+	return compile(&f, dir, raw)
 }
 
 // describeJSONError adds a line and column to decoding errors when the
@@ -235,7 +242,7 @@ func describeJSONError(raw []byte, err error) error {
 	return errors.New(msg)
 }
 
-func compile(f *fileScenario, dir string) (*Scenario, error) {
+func compile(f *fileScenario, dir string, raw []byte) (*Scenario, error) {
 	sc := &Scenario{
 		Name:    f.Name,
 		BaseURL: strings.TrimRight(f.BaseURL, "/"),
@@ -310,13 +317,26 @@ func compile(f *fileScenario, dir string) (*Scenario, error) {
 		}
 	}
 
-	c := &compiler{sc: sc, dir: dir, defHeaders: f.Defaults.Headers, defThink: defThink}
+	c := &compiler{sc: sc, dir: dir, raw: raw, defHeaders: f.Defaults.Headers, defThink: defThink}
+
+	// Thresholds on flows and steps are collected as they compile; the
+	// top-level list names flows and steps, so it waits until the end.
+	var scoped []Target
+	addThresholds := func(exprs []string, where string, fl *Flow, st *Step) error {
+		ts, err := c.fileThresholds(exprs, where, fl, st)
+		scoped = append(scoped, ts...)
+		return err
+	}
 
 	// Setup captures are visible to every flow.
 	known := copySet(base)
 	for i := range f.Setup {
-		st, err := c.step(&f.Setup[i], "setup", fmt.Sprintf("setup[%d]", i), known)
+		where := fmt.Sprintf("setup[%d]", i)
+		st, err := c.step(&f.Setup[i], "setup", where, known)
 		if err != nil {
+			return nil, err
+		}
+		if err := addThresholds(f.Setup[i].Thresholds, fmt.Sprintf("%s (%s)", where, st.Name), nil, st); err != nil {
 			return nil, err
 		}
 		sc.Setup = append(sc.Setup, st)
@@ -343,22 +363,36 @@ func compile(f *fileScenario, dir string) (*Scenario, error) {
 			return nil, fmt.Errorf("%s (%s): needs at least one step", where, ff.Name)
 		}
 		fl := &Flow{ID: i, Name: ff.Name, Weight: max(ff.Weight, 1)}
+		if err := addThresholds(ff.Thresholds, fmt.Sprintf("%s (%s)", where, ff.Name), fl, nil); err != nil {
+			return nil, err
+		}
 		known := copySet(afterSetup)
 		for j := range ff.Steps {
-			st, err := c.step(&ff.Steps[j], ff.Name, fmt.Sprintf("%s.steps[%d]", where, j), known)
+			sw := fmt.Sprintf("%s.steps[%d]", where, j)
+			st, err := c.step(&ff.Steps[j], ff.Name, sw, known)
 			if err != nil {
+				return nil, err
+			}
+			if err := addThresholds(ff.Steps[j].Thresholds, fmt.Sprintf("%s (%s)", sw, st.Name), nil, st); err != nil {
 				return nil, err
 			}
 			fl.Steps = append(fl.Steps, st)
 		}
 		sc.Flows = append(sc.Flows, fl)
 	}
+
+	top, err := c.fileThresholds(f.Thresholds, "top level", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	sc.Thresholds = append(top, scoped...)
 	return sc, nil
 }
 
 type compiler struct {
 	sc         *Scenario
 	dir        string
+	raw        []byte // the file, to point at a bad threshold
 	defHeaders map[string]string
 	defThink   Think
 	names      map[string]bool // flow/step keys already used
