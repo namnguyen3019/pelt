@@ -31,7 +31,7 @@ pelt [flags] <url>
 |------|---------|---------|
 | `-n` | 200 | Total requests. `0` means no limit (needs `-d` or stages). |
 | `-d` | off | Run for this long, e.g. `30s`. Without an explicit `-n`, runs for the full duration. |
-| `-c` | 50 | Concurrency: number of worker goroutines, i.e. max requests in flight. |
+| `-c` | 50 | Concurrency: number of worker goroutines, i.e. max requests in flight. Never more than `-n`. |
 | `-rate` | 0 | Max requests per second across all workers. `0` is unlimited. |
 | `-stages` | | Change the load over the run, e.g. `30s:200,2m:200,30s:0`. Sets the run length. See [Load stages](#load-stages). |
 | `-ramp` | | Ramp concurrency from 0 up to `-c` over this long, then hold for the rest of `-d`. |
@@ -298,7 +298,7 @@ Elapsed:      916ms
 
 Requests:     50000 completed, 50000 responses, 0 errors (0.00%)
 Throughput:   54598.3 requests/sec, 3.3 MiB/sec read
-Connections:  632 opened, 49368 reused
+Connections:  632 opened, 49368 requests reused a connection
 
 Latency (successful requests):
   min     2.082 ms
@@ -340,6 +340,52 @@ exact answer.
 
 **Connections** shows TCP connections opened vs requests that reused one. See
 [why the transport tuning matters](design.md#why-the-transport-tuning-matters).
+
+## JSON output
+
+`-o json` prints the same report as one JSON object on stdout; the live
+progress line goes to stderr, so the output pipes straight into `jq`. A run
+of 500 requests, with the histogram and series trimmed:
+
+```json
+{
+  "target": "http://127.0.0.1:8080/",
+  "method": "GET",
+  "concurrency": 20,
+  "requests_configured": 500,
+  "interrupted": false,
+  "passed": true,
+  "elapsed_ms": 168.624,
+  "total": 500,
+  "responses": 500,
+  "errors": 0,
+  "requests_per_sec": 2965.17,
+  "bytes_read": 31718,
+  "connections_opened": 20,
+  "connections_reused": 480,
+  "latency_ms": {
+    "min": 2.328, "mean": 6.485, "stddev": 2.269, "max": 11.011,
+    "percentiles": {"p50": 6.32, "p90": 9.664, "p95": 10.034, "p99": 10.726}
+  },
+  "histogram": [{"up_to_ms": 3.196, "count": 49}, ...],
+  "status_codes": {"200": 494, "500": 6},
+  "error_breakdown": {},
+  "series": [{"t": 0, "requests": 500, ...}]
+}
+```
+
+- `total` is `responses` plus `errors`. A response is any HTTP reply, 4xx and
+  5xx included; an error got no reply. `error_breakdown` groups errors by
+  kind: `timeout`, `connection refused`, `connection reset`,
+  `out of local ports`, `too many open files`, `dns lookup failed`,
+  `tls error` or `other: <message>`.
+- `latency_ms` and `histogram` cover responses only, and are left out when
+  there were none.
+- Set only when they apply: `requests_configured`, `duration_configured`,
+  `rate_limit`, `aborted` (requests cut off by Ctrl-C), `fail_reason`,
+  `thresholds` ([Thresholds](#thresholds)), and `stages_configured` and
+  `stages` ([Load stages](#load-stages)). `passed` and `series`
+  ([Per-second results](#per-second-results)) are always there.
 
 ## Stopping a run early
 

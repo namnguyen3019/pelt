@@ -58,7 +58,10 @@ The Windows installer also updates PATH for the current session, so `pelt`
 works right away there; other open terminals need restarting.
 
 `go install` puts the binary in `$(go env GOPATH)/bin`; add that to PATH if
-`pelt` is not found. For a local practice target, also install
+`pelt` is not found. Thresholds in flow mode, load stages and per-second
+series need v0.4.0 or later: if `pelt -h` does not list `-stages`, reinstall
+with one of the commands above (they take the latest release, v0.4.1 or
+newer). For a local practice target, also install
 `github.com/namnguyen3019/pelt/cmd/testserver@latest`
 (`testserver -addr 127.0.0.1:8080 -delay 2ms -jitter 8ms -error-rate 0.01`).
 
@@ -171,9 +174,7 @@ environment variable as in recipe 5.
 
 `-threshold 'metric op value'` (repeatable, both modes) makes the run exit 3
 when a target is missed. Quote each one so the shell leaves `<` and `>`
-alone. Single-URL `-threshold` is in v0.3.0; flow thresholds are on the main
-branch. If `pelt -h` or `pelt run -h` does not list `-threshold`, install
-from main as in [User flows](#user-flows-pelt-run).
+alone.
 
 | Metric | Value |
 |--------|-------|
@@ -216,10 +217,8 @@ failed checks fail the run.
 
 ## User flows: `pelt run`
 
-Use this when the test is a journey rather than one URL. Check that the
-installed version has it: `pelt run -h`. It is on the main branch but not
-in a release yet, so if `pelt run` is unknown, install from main:
-`go install github.com/namnguyen3019/pelt/cmd/pelt@main`.
+Use this when the test is a journey rather than one URL. `pelt run -h`
+lists its flags.
 
 ```text
 pelt run [flags] <scenario.json>
@@ -334,6 +333,7 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   "concurrency": 20,
   "requests_configured": 500,
   "interrupted": false,
+  "passed": true,
   "elapsed_ms": 176.7,
   "total": 500,
   "responses": 500,
@@ -348,7 +348,8 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   },
   "histogram": [{"up_to_ms": 3.566, "count": 55}, "... 10 buckets"],
   "status_codes": {"200": 493, "500": 7},
-  "error_breakdown": {}
+  "error_breakdown": {},
+  "series": ["... one object per second"]
 }
 ```
 
@@ -383,8 +384,9 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   `stage` and `target` (the stage and its target mid-second) are `null`
   without stages. Flow mode adds `iterations`,
   `aborted` and `check_fails`. `-series out.csv` writes the same columns.
-- Optional keys appear only when set: `duration_configured`, `rate_limit`,
-  `aborted`, `fail_reason`, `thresholds`, `stages_configured`, `stages`.
+- Optional keys appear only when set: `requests_configured`,
+  `duration_configured`, `rate_limit`, `aborted`, `fail_reason`,
+  `thresholds`, `stages_configured`, `stages`.
 
 The text output (`-o text`) shows the same numbers with labels `Requests:`,
 `Throughput:`, `Connections:`, `Latency`, `Histogram`, `Stages:` (with

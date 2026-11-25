@@ -449,38 +449,44 @@ same machine:
 $ pelt run examples/shop.json -u 50 -d 20s -seed 7
 Scenario:     shop (examples/shop.json)
 Load:         50 users, for 20s, seed 7
-Elapsed:      20.002s
+Elapsed:      20s
 
-Iterations:   726 started: 692 completed, 5 aborted, 29 cut by the end of the run (36.3/sec)
-Requests:     1914 completed, 1914 responses, 0 errors (0.00%), 5 failed checks
-Throughput:   95.7 requests/sec, 31.6 KiB/sec read
-Connections:  50 opened, 1864 requests reused a connection
+Iterations:   726 started: 692 completed, 3 aborted, 31 cut by the end of the run (36.3/sec)
+Requests:     1908 completed, 1908 responses, 0 errors (0.00%), 3 failed checks
+Throughput:   95.4 requests/sec, 31.6 KiB/sec read
+Connections:  50 opened, 1858 requests reused a connection
 
 Flow      weight  started     done  aborted    cut    flow p50    flow p95    flow p99    wall p50
-browse         7      497      475        2     20      13.444      18.863      20.763    1203.507
-checkout       3      229      217        3      9      28.069      35.596      37.050    1758.600
+browse         7      499      476        2     21      13.651      18.877      20.498    1198.588
+checkout       3      227      216        1     10      27.056      33.684      37.155    1771.110
   (times in ms; flow time is request time only, wall time includes think time)
 
 Step                         reqs  errors  failed        p50        p90        p95        p99        max
-setup / login                  50       0       0      6.840      9.999     11.056     11.603     11.603
-browse / list products        497       0       0      6.671      9.918     10.510     10.879     11.520
-browse / view product         477       0       2      6.722      9.895     10.558     11.033     12.065
-checkout / list products      229       0       0      6.824     10.152     10.561     10.981     11.430
-checkout / add to cart        224       0       1      6.697      9.960     10.672     10.813     10.961
-checkout / checkout           219       0       1      6.973     10.144     10.618     10.876     11.137
-checkout / order status       218       0       1      6.875      9.853     10.628     10.895     11.377
+setup / login                  50       0       0      7.449     10.458     10.707     11.698     11.698
+browse / list products        499       0       1      6.706     10.276     10.617     11.052     11.295
+browse / view product         477       0       1      6.691      9.969     10.427     10.833     11.266
+checkout / list products      227       0       0      6.584     10.074     10.557     10.895     11.145
+checkout / add to cart        222       0       0      6.848      9.960     10.401     10.806     11.310
+checkout / checkout           217       0       1      6.580      9.710     10.218     10.806     11.151
+checkout / order status       216       0       0      6.620      9.740     10.558     10.725     11.146
   (times in ms; failed = status check or capture failed)
 
 Aborted at step:
-       2  browse / view product
-       1  checkout / add to cart
+       1  browse / list products
+       1  browse / view product
        1  checkout / checkout
-       1  checkout / order status
+
+Timeline (2 seconds per row):
+  time    req/s   iter/s  p95 ms  errors  failed
+  0-2s      104     13.5  10.684       0       1
+  2-4s       96     37.5  10.536       0       0
+  4-6s       96     35.0  10.402       0       0
+  ...
 
 Status codes:
-  200  1691
-  201  218
-  500  5
+  200  1689
+  201  216
+  500  3
 ```
 
 - **Iterations**: every started iteration ends as completed, aborted (a
@@ -493,7 +499,10 @@ Status codes:
   Percentiles are over responses. `list products` in `browse` and in
   `checkout` are separate rows.
 - **Aborted at step** shows where failures cut iterations short. Here the
-  five injected 500s each stopped one iteration.
+  three injected 500s each stopped one iteration.
+- **Timeline** shows the run second by second (here 2 seconds per row, as
+  the run is a little over 20 seconds); see
+  [Per-second results](#per-second-results).
 
 With no think time, the same shop on the same machine served about 37,800
 requests per second across 200 users, each doing full journeys with logins,
@@ -619,7 +628,7 @@ browse (weight 7)
     Accept: application/json
     Cookie: session=3e1b3daa3d514d658b65d762
     -> 200 OK in 7.4ms, 814 bytes
-    response {"items":[{"id":1,"name":"Paddle 1","price":42.5},{"id":2,...  (first 300 bytes) ... (513 more bytes)
+    response {"items":[{"id":1,"name":"Paddle 1","price":42.5},{"id":2,"name":"Paddle 2",...  (513 more bytes)
     check ok: status 200
     capture product_id = "1"
   ...

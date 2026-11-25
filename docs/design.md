@@ -43,8 +43,8 @@ take effect immediately.
 **No shared state on the hot path.** Each worker writes into its own
 `recorder` (latency slice, status map, error map). No mutex, no results
 channel. The recorders are merged once, after `wg.Wait()`. The only shared
-writes are a few `atomic.Int64` counters used for the live progress line and
-the connection counts.
+writes are atomic: a few `atomic.Int64` counters for the live progress line
+and the connection counts, and the per-second rows described below.
 
 **Two kinds of stop.** The `-d` deadline only stops *dispatching*; requests
 already in flight finish, so the tail of the run is still measured. Ctrl-C
