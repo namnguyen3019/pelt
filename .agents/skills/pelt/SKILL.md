@@ -82,6 +82,7 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-body-file` | | Read the request body from a file. Not with `-body`. |
 | `-t` | 10s | Per-request timeout, including reading the body. |
 | `-o` | text | `text` or `json`. |
+| `-series` | | Also write one row per second to this CSV file. |
 | `-http2` | false | Allow HTTP/2 over TLS (default forces HTTP/1.1). |
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
 | `-quiet` | false | Hide the live progress line. |
@@ -233,7 +234,7 @@ A minimal scenario:
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
 total iterations, `-t` timeout, `-base` base URL, `-seed`, `-o json`,
-`-quiet`, `-http2`, `-dry-run`, plus `-threshold` (repeatable) and
+`-series out.csv`, `-quiet`, `-http2`, `-dry-run`, plus `-threshold` (repeatable) and
 `-no-thresholds`. They may go before or after the file.
 
 ```sh
@@ -321,6 +322,13 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   in flow mode), `expr`, `metric`, `op`, `target`, `actual` (`null` with
   `no_samples`), `unit` (`ms`, `%`, `count`, `per_sec`), `count` and `of` for
   rates, and `pass`.
+- `series`: one object per second of the run (always present). A request
+  counts in the second it finished, so the rows add up to the totals. Keys:
+  `t` (second), `active` (requests in flight at the end of the second),
+  `requests`, `responses`, `errors`, `s2xx` to `s5xx`, `rps`, and `p50`,
+  `p95`, `p99`, `max` in ms (`null` in a second with no responses).
+  `stage` and `target` are `null` for now. Flow mode adds `iterations`,
+  `aborted` and `check_fails`. `-series out.csv` writes the same columns.
 - Optional keys appear only when set: `duration_configured`, `rate_limit`,
   `aborted`, `fail_reason`, `thresholds`.
 
@@ -355,12 +363,27 @@ thresholds for the targets the user cares about.
 | `timeout` growing with load | Server is saturated, or `-t` is shorter than real response time. |
 | `connection reset` | Server or a proxy is closing connections, often from overload or a connection limit. |
 | `out of local ports` / `too many open files` | The client machine hit its limits. Lower `-c`, or raise `ulimit -n`. Not a server result. |
-| Many 5xx in `status_codes` | Server errors under load. Report the share and where in the ramp it started. |
+| Many 5xx in `status_codes` | Server errors under load. Report the share and where in the ramp it started (the first second in `series` with `s5xx` above 0). |
 | 429 in `status_codes` | Rate limiting on the target. Lower `-rate`. |
 | `connections_opened` far above `concurrency` | Keep-alive is not working (server closes connections, or `-untuned` was used). Throughput and latency then include connection setup. |
 | p99 much higher than p50 | Tail latency: queueing, GC pauses or slow dependencies. |
 | Raising `-c` raises latency but not `requests_per_sec` | Target is saturated. Extra concurrency is only queueing (latency ≈ concurrency ÷ throughput). |
 | Very high `requests_per_sec` with `errors` equal to `total` | Requests failed fast. The rate is meaningless. |
+
+### Finding when things went wrong
+
+The totals say whether a run went badly; `series` says when. Look for the
+first second where `errors` or `s5xx` jump, `p95` climbs well above the
+early seconds, or `rps` falls while `active` stays high (the server is
+queueing). For example:
+
+```sh
+pelt -d 60s -c 200 -o json http://127.0.0.1:8080/ \
+  | jq -c '.series[] | {t, rps, p95, errors, s5xx}'
+```
+
+Report that second and what changed in it. A long run's text report shows
+the same in a Timeline block of at most 20 rows.
 
 ## Reporting to the user
 

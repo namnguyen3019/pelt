@@ -38,6 +38,18 @@ and the partial report is printed (see the
 [sample](usage.md#stopping-a-run-early)). A second Ctrl-C kills the process,
 because `signal.NotifyContext`'s `stop()` restores default signal handling.
 
+**Per-second series.** Beside each latency, a worker keeps the time its
+request finished, as a `uint32` of milliseconds since the start (4 bytes,
+good for 49 days). It also adds to one shared row of counters per second
+(`internal/series`), with atomic adds and no locks: rows live in chunks of
+1,024 seconds that are allocated on first use with a compare-and-swap. A
+sampler goroutine wakes at the end of every second, on an absolute schedule,
+to note requests in flight. After the run, a counting pass groups the
+latencies by finish second and sorts each group, which costs about what the
+report's own sort does. That has to happen before the report sorts the
+latencies for the overall percentiles, since sorting breaks the link between
+a latency and its finish time.
+
 For what latency and percentiles mean in the report, see
 [Using Pelt](usage.md#full-sample-output).
 
@@ -87,7 +99,8 @@ internal/loadtest/   Config, tuned Transport, dispatcher + worker pool, Result
 internal/flow/       flow mode: scenario file, templates, captures, virtual users
 internal/testshop/   the small shop that testserver -app shop serves
 internal/stats/      percentiles, mean/stddev, histogram (pure functions)
-internal/report/     text and JSON rendering, threshold verdict
+internal/series/     per-second counters, sampler, rows and spans (lock-free)
+internal/report/     text and JSON rendering, timeline and series CSV, threshold verdict
 internal/threshold/  parse threshold expressions, compare measured values (pure)
 ```
 
@@ -106,11 +119,16 @@ go test -race ./...
   connections classified correctly, method/headers/body passed through,
   Ctrl-C returning partial results promptly, and tuned vs untuned connection
   reuse.
+- `internal/series`: counters shared by many goroutines across a chunk
+  boundary, a request finishing at 1.999 s landing in second 1, rows adding
+  up to the run's totals, empty seconds having no percentiles, the partial
+  last second, and timeline spans.
 - `internal/threshold`: parsing every metric, unit and operator, rejected
   expressions with a readable reason, and the boundary where a value equals
   its target.
 - `internal/report`: text and JSON output, the Thresholds block and verdict,
-  and the rule that a run with no responses fails.
+  the rule that a run with no responses fails, the Timeline, and stable
+  series JSON keys and CSV columns.
 - `cmd/pelt`: end-to-end run of the CLI against a local server, exit code 3
   for a missed threshold and for a dead target, and bad flag and threshold
   handling.
@@ -139,7 +157,6 @@ See [flows.md](flows.md#how-the-users-run).
 
 - Open-loop mode that corrects for coordinated omission
 - HDR histogram for constant memory on very long runs
-- Per-second time series in the JSON output
 - Ramp-up of workers over time (both modes)
 - Flow mode: a target-rate (open) model
 - Stopping a run early when a threshold is clearly missed

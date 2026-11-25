@@ -271,3 +271,39 @@ func TestValidate(t *testing.T) {
 		t.Errorf("after Validate: concurrency=%d method=%q err=%v, want 3, GET, nil", cfg.Concurrency, cfg.Method, err)
 	}
 }
+
+func TestSeriesAddsUpToTotals(t *testing.T) {
+	var n atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1)%5 == 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		time.Sleep(time.Millisecond)
+	}))
+	defer srv.Close()
+
+	res := newRunner(t, Config{URL: srv.URL, Duration: 1500 * time.Millisecond, Concurrency: 4, RateLimit: 200}).
+		Run(context.Background())
+
+	if len(res.Finish) != len(res.Latencies) {
+		t.Fatalf("%d finish times for %d latencies", len(res.Finish), len(res.Latencies))
+	}
+	if len(res.Series.Counts) != 2 {
+		t.Fatalf("%d series rows for a %v run, want 2", len(res.Series.Counts), res.Elapsed)
+	}
+	var req, resp, s5 int
+	for _, c := range res.Series.Counts {
+		req += c.Requests
+		resp += c.Responses
+		s5 += c.S5xx
+	}
+	if req != res.Total || resp != res.Successes || s5 != res.StatusCodes[503] {
+		t.Errorf("series sums %d/%d/%d, run totals %d/%d/%d", req, resp, s5, res.Total, res.Successes, res.StatusCodes[503])
+	}
+	if first := res.Series.Counts[0].Requests; first < 150 || first > 210 {
+		t.Errorf("first second has %d requests at 200/s", first)
+	}
+	if len(res.Series.Levels) != 2 || res.Series.Levels[0].Active > 4 {
+		t.Errorf("levels = %+v, want 2 with at most 4 in flight", res.Series.Levels)
+	}
+}

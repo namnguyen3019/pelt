@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/namnguyen3019/pelt/internal/series"
 )
 
 // Result is the raw outcome of a run. Turn it into numbers with the stats
@@ -21,13 +23,20 @@ type Result struct {
 	Successes int // requests that got a full HTTP response (any status)
 	Aborted   int // in-flight requests cut off by cancellation (not in Total)
 
-	Latencies   []time.Duration // one per successful request
+	Latencies []time.Duration // one per successful request
+	// Finish holds, beside each latency, when that request finished in
+	// milliseconds since the start, for the per-second series.
+	Finish      []uint32
 	StatusCodes map[int]int
 	Errors      map[string]int // error kind -> count
 	BytesRead   int64
 
 	ConnsNew    int64 // TCP connections dialled
 	ConnsReused int64 // requests sent on a previously used connection
+
+	// Series is the run second by second: counts and sampled levels.
+	// report.New turns it into rows with latency percentiles.
+	Series series.Raw
 }
 
 // ErrorCount is the number of requests that failed at the transport level
@@ -47,6 +56,7 @@ func (r *Result) RequestsPerSecond() float64 {
 // that worker's goroutine, so it needs no locking.
 type recorder struct {
 	latencies []time.Duration
+	finish    []uint32 // parallel to latencies
 	status    map[int]int
 	errors    map[string]int
 	bytes     int64
@@ -56,13 +66,15 @@ type recorder struct {
 func newRecorder(capacity int) *recorder {
 	return &recorder{
 		latencies: make([]time.Duration, 0, capacity),
+		finish:    make([]uint32, 0, capacity),
 		status:    make(map[int]int),
 		errors:    make(map[string]int),
 	}
 }
 
-func (rec *recorder) recordSuccess(code int, latency time.Duration, n int64) {
+func (rec *recorder) recordSuccess(code int, latency time.Duration, finish uint32, n int64) {
 	rec.latencies = append(rec.latencies, latency)
+	rec.finish = append(rec.finish, finish)
 	rec.status[code]++
 	rec.bytes += n
 }
@@ -79,9 +91,11 @@ func merge(recs []*recorder) *Result {
 		n += len(rec.latencies)
 	}
 	res.Latencies = make([]time.Duration, 0, n)
+	res.Finish = make([]uint32, 0, n)
 
 	for _, rec := range recs {
 		res.Latencies = append(res.Latencies, rec.latencies...)
+		res.Finish = append(res.Finish, rec.finish...)
 		for code, c := range rec.status {
 			res.StatusCodes[code] += c
 			res.Successes += c

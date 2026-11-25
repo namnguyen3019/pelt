@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
+	"github.com/namnguyen3019/pelt/internal/series"
 )
 
 // Result is the raw outcome of a flow run. internal/report turns it into
@@ -24,6 +25,10 @@ type Result struct {
 
 	ConnsNew    int64
 	ConnsReused int64
+
+	// Series is the run second by second: counts and sampled levels.
+	// report.NewFlow turns it into rows with latency percentiles.
+	Series series.Raw
 }
 
 // StepResult holds the numbers for one step.
@@ -39,7 +44,10 @@ type StepResult struct {
 	// at this step because of a failure here.
 	AbortedIterations int
 
-	Latencies   []time.Duration // one per response
+	Latencies []time.Duration // one per response
+	// Finish holds, beside each latency, when that response finished in
+	// milliseconds since the start, for the per-second series.
+	Finish      []uint32
 	StatusCodes map[int]int
 	Errors      map[string]int // transport error kind -> count
 	BytesRead   int64
@@ -134,10 +142,11 @@ func newRecorder(sc *Scenario) *recorder {
 	return rec
 }
 
-func (s *StepResult) recordResponse(code int, lat time.Duration, n int64) {
+func (s *StepResult) recordResponse(code int, lat time.Duration, finish uint32, n int64) {
 	s.Requests++
 	s.Responses++
 	s.Latencies = append(s.Latencies, lat)
+	s.Finish = append(s.Finish, finish)
 	if s.StatusCodes == nil {
 		s.StatusCodes = make(map[int]int, 2)
 	}
@@ -178,6 +187,7 @@ func merge(sc *Scenario, recs []*recorder) *Result {
 			dst.Aborted += src.Aborted
 			dst.AbortedIterations += src.AbortedIterations
 			dst.Latencies = append(dst.Latencies, src.Latencies...)
+			dst.Finish = append(dst.Finish, src.Finish...)
 			dst.BytesRead += src.BytesRead
 			for c, n := range src.StatusCodes {
 				dst.StatusCodes[c] += n

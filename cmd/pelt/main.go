@@ -135,6 +135,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		http2      = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
 		untuned    = fs.Bool("untuned", false, "use Go's stock connection pool limits (for comparison)")
 		output     = fs.String("o", "text", "output format: text or json")
+		seriesOut  = fs.String("series", "", "also write one row per second of the run to this CSV file")
 		quiet      = fs.Bool("quiet", false, "hide the live progress line")
 	)
 	fs.Var(&headers, "H", "request header 'Name: value' (repeatable)")
@@ -184,6 +185,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		payload = []byte(*body)
 	}
 
+	seriesFile, err := createSeries(*seriesOut)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitError
+	}
+	defer seriesFile.Close()
+
 	runner, err := loadtest.New(loadtest.Config{
 		URL:         fs.Arg(0),
 		Method:      strings.ToUpper(*method),
@@ -231,28 +239,64 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error writing report: %v\n", err)
 		return exitError
 	}
+	if err := writeSeries(seriesFile, rep.WriteSeriesCSV); err != nil {
+		fmt.Fprintf(stderr, "error writing %s: %v\n", *seriesOut, err)
+		return exitError
+	}
 	return finish(verdict, res.Interrupted, *output == "json", stderr)
+}
+
+// createSeries opens the -series file before the run, so a bad path fails
+// before any load is sent. It returns nil for an empty path.
+func createSeries(path string) (*os.File, error) {
+	if path == "" {
+		return nil, nil
+	}
+	return os.Create(path)
+}
+
+// writeSeries writes the CSV to f with write and closes f. A nil f is a
+// run without -series.
+func writeSeries(f *os.File, write func(io.Writer) error) error {
+	if f == nil {
+		return nil
+	}
+	if err := write(f); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // startProgress redraws a one-line counter on stderr every half second and
 // returns a function that stops it and clears the line.
 func startProgress(r *loadtest.Runner, w io.Writer) (stop func()) {
+	return redraw(w, func() string { return progressLine(r.Progress()) })
+}
+
+// progressLine is the live line for single-URL mode: requests so far, the
+// rate in the last whole second, and errors so far.
+func progressLine(p loadtest.Progress) string {
+	return fmt.Sprintf("%s requests, %s req/s last second, %s errors",
+		report.GroupInt(p.Completed), report.GroupInt(int64(p.LastSecond.Requests)), report.GroupInt(p.Errors))
+}
+
+// redraw prints line() over itself on w every half second until stopped,
+// then clears it.
+func redraw(w io.Writer, line func() string) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
 		t := time.NewTicker(500 * time.Millisecond)
 		defer t.Stop()
-		start := time.Now()
 		for {
 			select {
 			case <-done:
 				fmt.Fprint(w, "\r\033[K") // clear the progress line
 				return
 			case <-t.C:
-				n := r.Completed()
-				fmt.Fprintf(w, "\r\033[K  %d requests done, %.0f req/s so far",
-					n, float64(n)/time.Since(start).Seconds())
+				fmt.Fprintf(w, "\r\033[K  %s", line())
 			}
 		}
 	}()

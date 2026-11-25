@@ -31,6 +31,7 @@ write data (carts, orders, sign-ups), so run them against a test system.
 - [How the users run](#how-the-users-run)
 - [Flags](#flags)
 - [Reading the report](#reading-the-report)
+- [Per-second results](#per-second-results)
 - [Debugging a file with -dry-run](#debugging-a-file-with--dry-run)
 - [Not in this version yet](#not-in-this-version-yet)
 
@@ -352,7 +353,8 @@ Flags may go before or after the file name.
 | `-base` | file | Base URL, replacing `base_url`. |
 | `-seed` | random | Seed for flow picks, think time, `$rand` and `$uuid`. |
 | `-o` | text | `text` or `json`. |
-| `-quiet` | false | Hide the live progress line (iterations, iterations/sec, failed checks). |
+| `-series` | none | Also write one row per second of the run to this CSV file. See [Per-second results](#per-second-results). |
+| `-quiet` | false | Hide the live progress line (iterations so far, iterations and requests in the last whole second, failed checks). |
 | `-http2` | false | Allow HTTP/2 over TLS. |
 | `-dry-run` | false | Run setup and each flow once as one user and print everything. |
 | `-threshold` | none | A pass/fail target such as `p95<500ms` or `checkout/pay: errors<1%`. Repeatable; added to the file's. See [Thresholds](#thresholds). |
@@ -488,6 +490,33 @@ because no iteration completed, `"fail_reason"`. With thresholds it has a
 `actual` is `null` when there was nothing to measure. A failing run with
 `-o json` also prints one line to stderr, such as
 `pelt: FAIL: 1 of 3 thresholds missed`, so it shows in CI logs.
+
+## Per-second results
+
+Flow runs record the same per-second series as
+[single-URL mode](usage.md#per-second-results): a Timeline in the text report
+for runs of 3 seconds or more, a `series` array in JSON, and a CSV with
+`-series out.csv`. The rows cover the whole run, every step of every flow
+(setup included), and a request counts in the second it finished.
+
+Flow mode adds three keys and columns, and its Timeline shows iterations per
+second and failed checks in place of 5xx:
+
+| Column | Meaning |
+|--------|---------|
+| `iterations` | Iterations that ended in the second, completed or aborted. One cut by the end of the run is not counted. |
+| `aborted` | Of those, iterations stopped by a failed check, capture or transport error |
+| `check_fails` | Responses whose status check or a capture failed |
+
+`active` is the number of users running at the end of the second.
+
+```text
+Timeline (1 second per row):
+  time  req/s  iter/s  p95 ms  errors  failed
+  0-1s     24     1.0   4.829       0       0
+  1-2s     17     4.0   4.926       0       0
+  2-3s     24     8.0   4.548       0       0
+```
 
 ## Debugging a file with -dry-run
 

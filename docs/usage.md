@@ -39,9 +39,10 @@ pelt [flags] <url>
 | `-body-file` | | Read the request body from a file. |
 | `-t` | 10s | Per-request timeout, including reading the response body. |
 | `-o` | text | Output format: `text` or `json`. |
+| `-series` | | Also write one row per second of the run to this CSV file. See [Per-second results](#per-second-results). |
 | `-http2` | false | Allow HTTP/2 over TLS. By default the tool forces HTTP/1.1. |
 | `-untuned` | false | Use Go's stock connection pool limits, to see why tuning matters. |
-| `-quiet` | false | Hide the live progress line (only shown on a terminal). |
+| `-quiet` | false | Hide the live progress line (only shown on a terminal): requests so far, req/s in the last whole second, errors so far. |
 | `-threshold` | | Pass/fail target such as `'p95<300ms'` or `'errors<1%'`. Repeat for more. A missed target exits 3. See [Thresholds](#thresholds). |
 
 ## Examples
@@ -127,12 +128,72 @@ the same `-threshold` flag, plus `thresholds` lists in the scenario file per
 flow and per step, and metrics for checks and iterations; see
 [flow thresholds](flows.md#thresholds).
 
+## Per-second results
+
+Every run also records what happened in each second: how many requests
+finished, how they ended, and their latency. A request counts in the second
+it **finished**, so the rows add up to the run's totals and a slow request
+shows in the second it hurt. Use it to see when a run went wrong, not just
+whether it did.
+
+**In the terminal**, a run of 3 seconds or more ends with a Timeline of at
+most 20 rows, each covering an equal slice of the run:
+
+```text
+Timeline (1 second per row):
+  time  req/s  p95 ms  errors  5xx
+  0-1s    497   7.465       0    2
+  1-2s    501   7.342       0    4
+  2-3s    501   7.394       0    5
+  3-4s    500   7.309       0    0
+  4-5s    496   7.240       0    5
+```
+
+A 10-minute run gets 20 rows of 30 seconds. `p95` in a row is over every
+response in that slice, not an average of seconds. Shorter runs print no
+Timeline, so a quick `pelt <url>` looks as it always has.
+
+**In JSON**, `-o json` adds a `series` array with one object per second:
+
+```json
+"series": [
+  {"t": 0, "stage": null, "target": null, "active": 3, "requests": 497, "responses": 497,
+   "errors": 0, "s2xx": 495, "s3xx": 0, "s4xx": 0, "s5xx": 2, "rps": 497,
+   "p50": 5.24, "p95": 7.465, "p99": 8.112, "max": 10.461}
+]
+```
+
+**As CSV**, `-series out.csv` writes the same rows with a header, for a
+spreadsheet or a plotting script. The file is opened before the run, so a bad
+path fails before any load is sent (exit 1).
+
+```text
+t,stage,target,active,requests,responses,errors,s2xx,s3xx,s4xx,s5xx,rps,p50,p95,p99,max
+0,,,3,497,497,0,495,0,0,2,497,5.24,7.465,8.112,10.461
+4,,,0,252,252,0,247,0,0,5,495.73,5.02,7.24,8.136,8.17
+```
+
+| Column | Meaning |
+|--------|---------|
+| `t` | Second since the start: 0, 1, 2 ... |
+| `stage`, `target` | Reserved for load stages; empty (`null` in JSON) for now |
+| `active` | Requests in flight at the end of the second |
+| `requests`, `responses`, `errors` | Requests that finished; those that got a response; transport errors |
+| `s2xx` ... `s5xx` | Responses by status class |
+| `rps` | Requests that finished in the second, per second of run time. Equal to `requests` except in the last row, which covers only the part of a second the run lasted (252 requests in 0.508 s is 495.73/s). |
+| `p50`, `p95`, `p99`, `max` | Latency in ms of the responses that finished in the second; empty (`null`) when there were none |
+
+The keys and columns are stable; flow mode adds `iterations`, `aborted` and
+`check_fails` ([flow series](flows.md#per-second-results)). Keeping the
+series costs 4 bytes per response (its finish time, beside its latency) and
+about 100 bytes per second of run.
+
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Finished, and every threshold passed |
-| `1` | Runtime error, for example an unreadable `-body-file` |
+| `1` | Runtime error, for example an unreadable `-body-file` or a `-series` file that cannot be created |
 | `2` | Bad flags, config or threshold; nothing was sent |
 | `3` | A threshold was missed, or no request got a response (in flow mode, no iteration completed) |
 | `130` | Interrupted with Ctrl-C (report still printed, thresholds still shown) |

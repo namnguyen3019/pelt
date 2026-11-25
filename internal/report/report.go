@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
+	"github.com/namnguyen3019/pelt/internal/series"
 	"github.com/namnguyen3019/pelt/internal/stats"
 	"github.com/namnguyen3019/pelt/internal/threshold"
 )
@@ -25,18 +26,21 @@ type Report struct {
 	latency stats.Summary
 	hist    []stats.Bucket
 	verdict Verdict
+	ser     *series.Series
+	tl      timeline
 }
 
 // New computes statistics for res. It takes ownership of res.Latencies
 // (the slice gets sorted in place).
 func New(cfg loadtest.Config, res *loadtest.Result) *Report {
-	r := &Report{
-		cfg: cfg,
-		res: res,
-		// Histogram first: it does not need sorted input, Summarize sorts.
-		hist:    stats.Histogram(res.Latencies, histogramBuckets),
-		latency: stats.Summarize(res.Latencies, stats.DefaultPercentiles),
-	}
+	r := &Report{cfg: cfg, res: res}
+	// The series and histogram first: the series needs each latency next
+	// to its finish time, and Summarize sorts the latencies in place.
+	r.ser = series.Build(res.Series, series.Samples{Latencies: res.Latencies, Finish: res.Finish})
+	r.tl = newTimeline(r.ser)
+	r.ser.Release()
+	r.hist = stats.Histogram(res.Latencies, histogramBuckets)
+	r.latency = stats.Summarize(res.Latencies, stats.DefaultPercentiles)
 	r.Check(nil)
 	return r
 }
@@ -126,6 +130,8 @@ func (r *Report) WriteText(w io.Writer) error {
 		b.WriteString("\nHistogram:\n")
 		writeHistogram(&b, r.hist)
 	}
+
+	writeTimeline(&b, r.ser, r.tl)
 
 	if len(res.StatusCodes) > 0 {
 		b.WriteString("\nStatus codes:\n")
@@ -245,6 +251,7 @@ type jsonReport struct {
 	StatusCodes    map[string]int  `json:"status_codes"`
 	ErrorBreakdown map[string]int  `json:"error_breakdown"`
 	Thresholds     []jsonThreshold `json:"thresholds,omitempty"`
+	Series         []jsonSeriesRow `json:"series"`
 }
 
 type jsonLatency struct {
@@ -284,6 +291,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		StatusCodes:    map[string]int{},
 		ErrorBreakdown: res.Errors,
 		Thresholds:     toJSONThresholds(r.verdict),
+		Series:         toJSONSeries(r.ser),
 	}
 	if cfg.Duration > 0 {
 		out.Duration = cfg.Duration.String()
@@ -306,5 +314,8 @@ func (r *Report) WriteJSON(w io.Writer) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }
+
+// WriteSeriesCSV writes the per-second series as CSV, for -series.
+func (r *Report) WriteSeriesCSV(w io.Writer) error { return writeSeriesCSV(w, r.ser) }
 
 func msf(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
