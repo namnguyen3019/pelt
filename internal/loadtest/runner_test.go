@@ -231,7 +231,9 @@ func TestCancelReturnsPartialResults(t *testing.T) {
 // TestConnectionReuse checks the point of the transport tuning: with the
 // tuned pool each worker keeps one connection; with Go's stock limit of two
 // idle connections per host, most finished connections get closed and
-// re-dialled.
+// re-dialled. A few extra dials are normal: Go's transport races a new dial
+// against a connection coming back to the idle pool (see docs/design.md),
+// so on a busy machine a run can open a handful more than one per worker.
 func TestConnectionReuse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		time.Sleep(time.Millisecond)
@@ -244,11 +246,11 @@ func TestConnectionReuse(t *testing.T) {
 	cfg.Untuned = true
 	untuned := newRunner(t, cfg).Run(context.Background())
 
-	if tuned.ConnsNew > 20 {
-		t.Errorf("tuned: %d new connections, want at most 20 (one per worker)", tuned.ConnsNew)
+	if tuned.ConnsNew > 30 {
+		t.Errorf("tuned: %d new connections, want about one per worker (20, at most 30)", tuned.ConnsNew)
 	}
-	if tuned.ConnsReused < 380 {
-		t.Errorf("tuned: %d requests reused a connection, want at least 380 of 400", tuned.ConnsReused)
+	if tuned.ConnsReused < 370 {
+		t.Errorf("tuned: %d requests reused a connection, want at least 370 of 400", tuned.ConnsReused)
 	}
 	if untuned.ConnsNew <= tuned.ConnsNew*2 {
 		t.Errorf("untuned opened %d connections vs tuned %d; expected far more churn",
