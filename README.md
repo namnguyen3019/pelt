@@ -6,6 +6,32 @@ goroutines and reports throughput (requests per second), latency percentiles,
 a latency histogram, status codes, errors grouped by kind, and how well
 connections were reused.
 
+## Highlights
+
+- **One static binary.** Download it and run it. No Go, Python or other
+  runtime needed, and no config file or test script to write first.
+- **Fast on one machine.** About 54,600 requests/sec with 1,000 workers in the
+  sample below (client and server sharing one 4-vCPU machine), from a single
+  process that uses every CPU core.
+- **Latency you can trust.** min, mean, stddev, max, p50, p90, p95 and p99,
+  plus a histogram, status codes and errors grouped by kind (timeout,
+  refused, reset and so on).
+- **Connection reuse you can see.** The connection pool is sized to the
+  worker count, and the report shows TCP connections opened vs reused. Tuned,
+  it ran 48,589 req/s against 26,053 req/s with Go's stock settings
+  ([details](#why-the-transport-tuning-matters)).
+- **Three ways to size a run.** A fixed request count (`-n`), a fixed duration
+  (`-d`), or both, with bounded concurrency (`-c`, tested up to 5,000 workers)
+  and an optional global rate limit (`-rate`).
+- **Any HTTP request.** Any method, repeatable headers, and an inline or file
+  request body. HTTP/1.1 by default, HTTP/2 with `-http2`.
+- **Built for scripts and CI.** JSON output (`-o json`), clear exit codes, and
+  Ctrl-C stops the run but still prints a report of everything so far.
+- **Small and well tested.** Standard library only. Unit and integration tests
+  run clean under the race detector.
+
+A run looks like this:
+
 ```text
 $ pelt -n 50000 -c 1000 http://127.0.0.1:8080/
 Target:       GET http://127.0.0.1:8080/
@@ -43,22 +69,37 @@ Status codes:
   500  242
 ```
 
-## Features
-
-- Fixed request count (`-n`), fixed duration (`-d`), or both (whichever comes first)
-- Bounded concurrency with a worker pool (`-c`), tested up to 5,000 workers
-- Optional global rate limit in requests per second (`-rate`)
-- Any method, repeatable headers, inline or file request body
-- Per-request timeout that covers reading the whole response
-- Ctrl-C stops the run and still prints a report of everything so far
-- Text or JSON output (`-o json`) for scripts and dashboards
-- Connection pool sized to the worker count, with live proof in the report
-- Unit tests for the statistics, integration tests against `httptest.Server`,
-  all clean under the race detector
-
 ## Install
 
-Requires Go 1.23 or newer.
+**One-line installer** (Linux and macOS, amd64 and arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | sh
+```
+
+It picks the release archive for your OS and CPU, checks its SHA-256 against
+the release's `checksums.txt`, and installs `pelt` to `/usr/local/bin` (using
+`sudo` only if that directory is not writable). Options:
+
+```sh
+# a specific version
+curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | sh -s -- v0.1.0
+
+# somewhere you own, no sudo
+curl -fsSL https://raw.githubusercontent.com/namnguyen3019/pelt/main/install.sh | INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+**Prebuilt binary.** Every [release](https://github.com/namnguyen3019/pelt/releases)
+has `pelt_<os>_<arch>.tar.gz` for `linux` and `darwin` (`amd64`, `arm64`),
+`pelt_windows_<arch>.zip` for Windows, and a `checksums.txt`. For example:
+
+```sh
+curl -fsSLO https://github.com/namnguyen3019/pelt/releases/latest/download/pelt_linux_amd64.tar.gz
+tar xzf pelt_linux_amd64.tar.gz pelt
+sudo mv pelt /usr/local/bin/
+```
+
+**With Go** (1.23 or newer). Use the lowercase module path:
 
 ```sh
 go install github.com/namnguyen3019/pelt/cmd/pelt@latest
@@ -69,6 +110,27 @@ test server:
 
 ```sh
 go install github.com/namnguyen3019/pelt/cmd/testserver@latest
+```
+
+**From source:**
+
+```sh
+git clone https://github.com/namnguyen3019/pelt.git
+cd pelt
+go build -o pelt ./cmd/pelt
+sudo mv pelt /usr/local/bin/
+```
+
+### Releasing
+
+Pushing a tag that starts with `v` runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which tests,
+builds all six targets and publishes a GitHub Release with the archives and
+`checksums.txt`:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 ## Quick start
@@ -122,6 +184,32 @@ pelt -n 5000 -c 100 -m POST -H 'Content-Type: application/json' \
 
 Exit codes: `0` finished, `130` interrupted with Ctrl-C (report still printed),
 `2` bad flags or config, `1` other errors.
+
+## Pelt vs Locust
+
+[Locust](https://docs.locust.io) is a popular open source load testing tool where
+you describe user behaviour in Python. The two tools aim at different jobs:
+
+| | Pelt | Locust |
+|---|---|---|
+| Install | One static binary, or `go install` | `pip install locust` (needs Python) |
+| Defining a test | Command-line flags: one URL, method, headers, body | Python code: user classes with tasks, so logins, loops, conditions and any Python library |
+| Load model | A fixed pool of workers (`-c`) sending back to back, with an optional global rate cap | Simulated users with wait times, a spawn rate to ramp up, and custom load shapes |
+| Interface | Terminal: live progress line, then a text or JSON report | Web UI with live charts and load you can change mid-run; also runs headless |
+| Scaling out | One process uses every core; no distributed mode | One process per core (Python's GIL); `--processes` and master/worker mode, across many machines |
+| Throughput per process | About 54,600 req/s in the sample above | Up to about 16,000 req/s with `FastHttpUser` or 4,000 with `HttpUser`, best case, per Locust's docs |
+| Results | Percentiles, histogram, status codes, error kinds, connections opened vs reused | Live stats and charts, CSV export |
+| Protocols | HTTP and HTTPS | HTTP out of the box, any protocol with a custom client |
+
+The throughput figures come from different hardware and different tests (Pelt:
+client and server sharing one 4-vCPU machine; Locust: its own docs, one
+process on one core), so read them as orders of magnitude, not a benchmark.
+
+**When to use which.** Use Pelt to hammer one endpoint and get throughput,
+latency percentiles and connection behaviour in seconds, from a terminal or a
+CI job. Use Locust when the test is a user journey (log in, browse, check
+out), when you want a web UI to watch and steer the load, or when you need to
+spread load across many machines.
 
 ## How it works
 
