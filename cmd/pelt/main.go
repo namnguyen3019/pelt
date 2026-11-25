@@ -3,7 +3,11 @@
 //
 //	pelt -n 10000 -c 200 http://127.0.0.1:8080/
 //	pelt -d 30s -c 500 -rate 2000 http://127.0.0.1:8080/
+//	pelt -d 30s -threshold 'p95<300ms' -threshold 'errors<1%' http://127.0.0.1:8080/
 //	pelt run -u 50 -d 2m shop.json      # flow mode, see docs/flows.md
+//
+// Exit codes: 0 pass, 1 runtime error, 2 bad flags, 3 a threshold was missed
+// or no request got a response, 130 interrupted.
 //
 // Press Ctrl-C once to stop early and still get a report. Press it again to
 // quit immediately.
@@ -24,6 +28,16 @@ import (
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/report"
+	"github.com/namnguyen3019/pelt/internal/threshold"
+)
+
+// Exit codes. 130 (interrupted) is the shell convention for Ctrl-C.
+const (
+	exitOK          = 0
+	exitError       = 1 // runtime failure, e.g. an unreadable body file
+	exitUsage       = 2 // bad flags, file or threshold; nothing was sent
+	exitFailed      = 3 // a threshold was missed, or nothing got a response
+	exitInterrupted = 130
 )
 
 // headerFlag implements flag.Value so -H can be repeated.
@@ -42,6 +56,49 @@ func (f *headerFlag) Set(v string) error {
 	}
 	f.h.Add(name, strings.TrimSpace(value))
 	return nil
+}
+
+// thresholdFlag implements flag.Value so -threshold can be repeated. Each
+// value is parsed as it is set, so a typo fails before any load is sent.
+type thresholdFlag []threshold.Threshold
+
+func (f *thresholdFlag) String() string { return "" }
+
+func (f *thresholdFlag) Set(v string) error {
+	t, err := threshold.Parse(v)
+	if err != nil {
+		return err
+	}
+	*f = append(*f, t)
+	return nil
+}
+
+// checkSingleURL rejects thresholds that only make sense in flow mode.
+func (f thresholdFlag) checkSingleURL() error {
+	for _, t := range f {
+		if t.Scope != "" {
+			return fmt.Errorf("threshold %q: scopes like %q are for flow mode; single-URL mode measures the whole run", t.Expr, t.Scope+":")
+		}
+		if t.FlowOnly() {
+			return fmt.Errorf("threshold %q: %s only exists in flow mode", t.Expr, t.Metric)
+		}
+	}
+	return nil
+}
+
+// finish turns a verdict into the exit code, and with JSON output prints
+// a one-line failure note to stderr so it shows in CI logs.
+func finish(v report.Verdict, interrupted, jsonOut bool, stderr io.Writer) int {
+	if !v.Passed() && jsonOut {
+		fmt.Fprintf(stderr, "pelt: FAIL: %s\n", v.Summary())
+	}
+	switch {
+	case interrupted:
+		return exitInterrupted
+	case !v.Passed():
+		return exitFailed
+	}
+	return exitOK
 }
 
 func main() {
@@ -65,21 +122,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var (
-		headers  headerFlag
-		n        = fs.Int("n", 200, "total number of requests (0 = no limit, needs -d)")
-		c        = fs.Int("c", 50, "concurrency: number of worker goroutines")
-		d        = fs.Duration("d", 0, "run for this long, e.g. 30s (overrides the default -n)")
-		rate     = fs.Float64("rate", 0, "max requests per second across all workers (0 = unlimited)")
-		method   = fs.String("m", "GET", "HTTP method")
-		body     = fs.String("body", "", "request body")
-		bodyFile = fs.String("body-file", "", "read the request body from this file")
-		timeout  = fs.Duration("t", 10*time.Second, "per-request timeout")
-		http2    = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
-		untuned  = fs.Bool("untuned", false, "use Go's stock connection pool limits (for comparison)")
-		output   = fs.String("o", "text", "output format: text or json")
-		quiet    = fs.Bool("quiet", false, "hide the live progress line")
+		headers    headerFlag
+		thresholds thresholdFlag
+		n          = fs.Int("n", 200, "total number of requests (0 = no limit, needs -d)")
+		c          = fs.Int("c", 50, "concurrency: number of worker goroutines")
+		d          = fs.Duration("d", 0, "run for this long, e.g. 30s (overrides the default -n)")
+		rate       = fs.Float64("rate", 0, "max requests per second across all workers (0 = unlimited)")
+		method     = fs.String("m", "GET", "HTTP method")
+		body       = fs.String("body", "", "request body")
+		bodyFile   = fs.String("body-file", "", "read the request body from this file")
+		timeout    = fs.Duration("t", 10*time.Second, "per-request timeout")
+		http2      = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
+		untuned    = fs.Bool("untuned", false, "use Go's stock connection pool limits (for comparison)")
+		output     = fs.String("o", "text", "output format: text or json")
+		quiet      = fs.Bool("quiet", false, "hide the live progress line")
 	)
 	fs.Var(&headers, "H", "request header 'Name: value' (repeatable)")
+	fs.Var(&thresholds, "threshold", "pass/fail target such as 'p95<300ms', 'errors<1%' or 'rps>500' (repeatable); exit 3 if missed")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -103,6 +162,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *output != "text" && *output != "json" {
 		fmt.Fprintf(stderr, "error: -o must be text or json\n")
 		return 2
+	}
+	if err := thresholds.checkSingleURL(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
 	}
 
 	var payload []byte
@@ -158,6 +221,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	stopProgress()
 
 	rep := report.New(runner.Config(), res)
+	verdict := rep.Check(thresholds)
 	if *output == "json" {
 		err = rep.WriteJSON(stdout)
 	} else {
@@ -165,12 +229,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error writing report: %v\n", err)
-		return 1
+		return exitError
 	}
-	if res.Interrupted {
-		return 130 // conventional exit code for "terminated by Ctrl-C"
-	}
-	return 0
+	return finish(verdict, res.Interrupted, *output == "json", stderr)
 }
 
 // startProgress redraws a one-line counter on stderr every half second and

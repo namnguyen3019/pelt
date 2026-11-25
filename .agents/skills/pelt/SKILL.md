@@ -85,6 +85,7 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-http2` | false | Allow HTTP/2 over TLS (default forces HTTP/1.1). |
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
 | `-quiet` | false | Hide the live progress line. |
+| `-threshold` | | Pass/fail target, e.g. `'p95<300ms'`, `'errors<1%'`. Repeatable. Missed = exit 3. See [Thresholds](#thresholds-passfail). |
 
 ## Recipes
 
@@ -116,6 +117,11 @@ pelt -n 1000 -c 20 -m PUT -body-file payload.json -o json http://127.0.0.1:8080/
 # 7. Pull out the key numbers
 pelt -n 5000 -c 100 -o json http://127.0.0.1:8080/ \
   | jq '{rps: .requests_per_sec, errors, status_codes, p50: .latency_ms.percentiles.p50, p99: .latency_ms.percentiles.p99}'
+
+# 8. Gate CI on targets the user gave: exit 3 if any is missed
+pelt -d 30s -c 100 -rate 500 -o json \
+  -threshold 'p95<300ms' -threshold 'errors<1%' -threshold 'status:5xx<0.5%' \
+  http://127.0.0.1:8080/ > pelt.json
 ```
 
 Ramp-up pattern: run recipe 4 at increasing rates (for example 100, 500,
@@ -124,6 +130,31 @@ jumps. The last good step is the capacity estimate.
 
 Never put real secrets on the command line in your reply; read them from an
 environment variable as in recipe 5.
+
+## Thresholds (pass/fail)
+
+`-threshold 'metric op value'` (repeatable, single-URL mode only) makes the
+run exit 3 when a target is missed. Quote each one so the shell leaves `<`
+and `>` alone. `-threshold` is on the main branch; if `pelt -h` does not list
+it, install from main as in [User flows](#user-flows-pelt-run).
+
+| Metric | Value |
+|--------|-------|
+| `p50`, `p95`, `p99`, `p99.9` (any `pN`), `mean`, `max` | Latency: `300ms`, `1.5s`, or bare ms |
+| `errors` | Transport errors (no HTTP reply): `1%` of requests, or a count like `5` |
+| `status:5xx`, `status:4xx`, `status:2xx`, `status:503` | Share of requests (`0.5%`) or a count |
+| `rps` | Requests per second, e.g. `rps>500` |
+| `requests` | Completed requests, e.g. `requests>=10000` |
+
+Operators: `<`, `<=`, `>`, `>=`. 5xx responses are not `errors`; use
+`status:5xx`. A metric with nothing to measure fails as `no samples`. A bad
+expression exits 2 before any load is sent.
+
+- Set thresholds only from targets the user stated (an SLO, "p95 under
+  200 ms"). Don't invent targets; if none were given, run without thresholds
+  and report the numbers.
+- When a run exits 3, read `thresholds[]` in the JSON and report each failed
+  one with its `actual` against `target`.
 
 ## User flows: `pelt run`
 
@@ -203,7 +234,9 @@ plus `iterations` (`started`, `completed`, `aborted`, `cut`, `per_sec`),
 `steps[]` (per step: `requests`, `errors`, `failed_checks`, `latency_ms`,
 `status_codes`). A run is healthy only if `failed_checks`, `errors` and
 `setup_failed_users` are 0 and `iterations.aborted` is small; exit code 0 does
-not mean that. `cut` iterations were stopped by the end of the run, not
+not mean that. Exit 3 (`"passed": false`, `fail_reason`
+`"no iteration completed"`) means no iteration finished at all. Flow mode
+does not take `-threshold` yet. `cut` iterations were stopped by the end of the run, not
 failures. Full reference: `docs/flows.md` in the repository.
 
 To practise locally: `testserver -app shop -addr 127.0.0.1:8080` serves a
@@ -253,21 +286,37 @@ small shop (`POST /login` for users `user001`..., `GET /products`,
   that.
 - `interrupted` / `aborted`: the run was stopped by Ctrl-C or SIGTERM;
   results are partial.
+- `passed`: `false` when a threshold was missed or no request got a
+  response; always present. `fail_reason` says `"no request got a response"`
+  when that rule failed the run.
+- `thresholds` (only with `-threshold`): one object per threshold, failures
+  first: `expr`, `metric`, `op`, `target`, `actual` (`null` with
+  `no_samples`), `unit` (`ms`, `%`, `count`, `per_sec`), `count` and `of` for
+  rates, and `pass`.
 - Optional keys appear only when set: `duration_configured`, `rate_limit`,
-  `aborted`.
+  `aborted`, `fail_reason`, `thresholds`.
 
 The text output (`-o text`) shows the same numbers with labels `Requests:`,
 `Throughput:`, `Connections:`, `Latency`, `Histogram`, `Status codes:` and
-`Errors:`.
+`Errors:`, then `Thresholds:` and a `Result: PASS` or `Result: FAIL (...)`
+line when there are thresholds or the run failed. With `-o json`, a failing
+run also prints `pelt: FAIL: ...` to stderr.
 
 ## Exit codes
 
-`0` the run finished, `130` interrupted (report still printed), `2` bad flags
-or config, `1` other failure (for example an unreadable `-body-file`).
+| Code | Meaning |
+|------|---------|
+| `0` | Finished; every threshold passed (or none were set) |
+| `1` | Other failure, for example an unreadable `-body-file` |
+| `2` | Bad flags, config or threshold; nothing was sent |
+| `3` | A threshold was missed, or no request got a response (flow mode: no iteration completed) |
+| `130` | Interrupted (report still printed), even if a threshold failed |
 
-**Exit code 0 does not mean the target is healthy.** A run where every
-request was refused or returned 500 still exits 0. Always check `errors`,
-`error_breakdown` and `status_codes` before calling a run a success.
+**Without thresholds, exit code 0 does not mean the target is healthy.** It
+only means at least one request got a response: a run where every request
+returned 500, or half of them timed out, still exits 0. Check `errors`,
+`error_breakdown` and `status_codes` before calling a run a success, or set
+thresholds for the targets the user cares about.
 
 ## What results suggest a problem
 

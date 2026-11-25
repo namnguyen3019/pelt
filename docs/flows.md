@@ -279,10 +279,13 @@ Flags may go before or after the file name.
 | `-http2` | false | Allow HTTP/2 over TLS. |
 | `-dry-run` | false | Run setup and each flow once as one user and print everything. |
 
-Exit codes: `0` finished, `130` interrupted, `2` bad file or flags (with the
-field, or the line and column), `1` other errors or a failed `-dry-run`. As
-in single-URL mode, `0` does not mean every check passed; read
-`failed_checks` in the report.
+Exit codes: `0` finished, `3` no iteration completed (the report ends with
+`Result: FAIL (no iteration completed)`, and JSON has `"passed": false`),
+`130` interrupted, `2` bad file or flags (with the field, or the line and
+column), `1` other errors or a failed `-dry-run`. `0` does not mean every
+check passed; read `failed_checks` in the report. Thresholds that fail a flow
+run on latency, errors or checks are not in flow mode yet; single-URL mode
+has them ([thresholds](usage.md#thresholds)).
 
 ## Reading the report
 
@@ -434,8 +437,9 @@ Planned for later versions, roughly in this order:
 - Ramp-up (`-ramp`), `sequential` and `random` data modes, and checks on the
   body (`body_contains`, JSON field equals, max latency).
 - A target-rate (open) model, `-rate` iterations per second, counting
-  iterations dropped when no user is free; thresholds in the file that fail
-  the run for CI; per-step histograms in JSON.
+  iterations dropped when no user is free; thresholds in the file, per flow
+  and per step, that fail the run for CI (single-URL mode already has
+  `-threshold`); per-step histograms in JSON.
 - YAML scenario files, load stages, loops and conditional steps.
 
 Single-URL mode (`pelt [flags] <url>`) is unchanged and remains the fastest

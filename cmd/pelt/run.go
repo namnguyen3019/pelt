@@ -137,12 +137,9 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error writing report: %v\n", err)
-		return 1
+		return exitError
 	}
-	if res.Interrupted {
-		return 130
-	}
-	return 0
+	return finish(rep.Verdict(), res.Interrupted, *output == "json", stderr)
 }
 
 func randomSeed() uint64 {

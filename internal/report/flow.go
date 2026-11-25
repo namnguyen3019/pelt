@@ -22,11 +22,12 @@ var (
 
 // FlowReport is the computed view of a flow run.
 type FlowReport struct {
-	res    *flow.Result
-	totals *loadtest.Result
-	steps  []stats.Summary // by step id
-	flows  []stats.Summary // flow time, by flow id
-	walls  []stats.Summary // wall time, by flow id
+	res     *flow.Result
+	totals  *loadtest.Result
+	steps   []stats.Summary // by step id
+	flows   []stats.Summary // flow time, by flow id
+	walls   []stats.Summary // wall time, by flow id
+	verdict Verdict
 }
 
 // NewFlow computes statistics for res. Like New, it sorts the latency
@@ -40,8 +41,18 @@ func NewFlow(res *flow.Result) *FlowReport {
 		r.flows = append(r.flows, stats.Summarize(res.Flows[i].FlowTimes, flowPercentiles))
 		r.walls = append(r.walls, stats.Summarize(res.Flows[i].WallTimes, flowPercentiles))
 	}
+	// Thresholds in flow mode come in a later version; for now only the
+	// built-in rule applies: a run in which no iteration completed fails.
+	reason := ""
+	if _, completed, _, _ := res.Iterations(); completed == 0 {
+		reason = "no iteration completed"
+	}
+	r.verdict = newVerdict(nil, reason)
 	return r
 }
+
+// Verdict says whether the run passed.
+func (r *FlowReport) Verdict() Verdict { return r.verdict }
 
 func stepLabel(st *flow.Step) string { return st.Flow + " / " + st.Name }
 
@@ -150,6 +161,8 @@ func (r *FlowReport) WriteText(w io.Writer) error {
 		}
 	}
 
+	writeVerdict(&b, r.verdict)
+
 	_, err := io.WriteString(w, b.String())
 	return err
 }
@@ -193,6 +206,8 @@ type jsonFlowReport struct {
 	Iterations     int            `json:"iterations_configured,omitempty"`
 	Seed           uint64         `json:"seed"`
 	Interrupted    bool           `json:"interrupted"`
+	Passed         bool           `json:"passed"`
+	FailReason     string         `json:"fail_reason,omitempty"`
 	ElapsedMS      float64        `json:"elapsed_ms"`
 	Iters          jsonIterations `json:"iterations"`
 	SetupFailed    int            `json:"setup_failed_users"`
@@ -277,6 +292,8 @@ func (r *FlowReport) WriteJSON(w io.Writer) error {
 		Iterations:  opts.Iterations,
 		Seed:        opts.Seed,
 		Interrupted: res.Interrupted,
+		Passed:      r.verdict.Passed(),
+		FailReason:  r.verdict.Reason,
 		ElapsedMS:   msf(res.Elapsed),
 		Iters: jsonIterations{Started: started, Completed: completed, Aborted: aborted, Cut: cutN,
 			PerSec: float64(started) / secs},
