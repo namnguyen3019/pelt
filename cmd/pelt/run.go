@@ -35,6 +35,7 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		base     = fs.String("base", "", "base URL for relative step URLs, replacing the file's base_url")
 		seed     = fs.Uint64("seed", 0, "random seed for flow picks, think time and $rand (default: random, printed in the report)")
 		output   = fs.String("o", "text", "output format: text or json")
+		seriesTo = fs.String("series", "", "also write one row per second of the run to this CSV file")
 		quiet    = fs.Bool("quiet", false, "hide the live progress line")
 		http2    = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
 		dryRun   = fs.Bool("dry-run", false, "run setup and each flow once as one user, print every request and response, and exit")
@@ -139,6 +140,12 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
 	}
+	seriesFile, err := createSeries(*seriesTo)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitError
+	}
+	defer seriesFile.Close()
 
 	stopProgress := func() {}
 	if !*quiet && isTerminal(os.Stderr) {
@@ -158,6 +165,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error writing report: %v\n", err)
 		return exitError
 	}
+	if err := writeSeries(seriesFile, rep.WriteSeriesCSV); err != nil {
+		fmt.Fprintf(stderr, "error writing %s: %v\n", *seriesTo, err)
+		return exitError
+	}
 	return finish(rep.Verdict(), res.Interrupted, *output == "json", stderr)
 }
 
@@ -171,27 +182,14 @@ func randomSeed() uint64 {
 }
 
 func startFlowProgress(r *flow.Runner, w io.Writer) (stop func()) {
-	done := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-		start := time.Now()
-		for {
-			select {
-			case <-done:
-				fmt.Fprint(w, "\r\033[K")
-				return
-			case <-t.C:
-				n, fails := r.Progress()
-				fmt.Fprintf(w, "\r\033[K  %d iterations done, %.1f/s, %d failed checks",
-					n, float64(n)/time.Since(start).Seconds(), fails)
-			}
-		}
-	}()
-	return func() {
-		close(done)
-		<-finished
-	}
+	return redraw(w, func() string { return flowProgressLine(r.Progress()) })
+}
+
+// flowProgressLine is the live line for flow mode: iterations so far, and
+// iterations and requests in the last whole second, and failed checks.
+func flowProgressLine(p flow.Progress) string {
+	last := p.LastSecond
+	return fmt.Sprintf("%s iterations, %s/s and %s req/s last second, %s failed checks",
+		report.GroupInt(p.Iterations), report.GroupInt(int64(last.Iterations)),
+		report.GroupInt(int64(last.Requests)), report.GroupInt(p.CheckFails))
 }

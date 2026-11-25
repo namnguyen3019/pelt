@@ -234,3 +234,39 @@ func TestRunFlowBadThresholds(t *testing.T) {
 		}
 	}
 }
+
+func TestRunFlowSeriesCSV(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	file := writeShopScenario(t)
+	path := filepath.Join(t.TempDir(), "flow.csv")
+
+	var stdout, stderr bytes.Buffer
+	code := runFlow([]string{file, "-base", srv.URL, "-u", "2", "-i", "20", "-series", path, "-o", "json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(b), "t,stage,target,active,requests,responses,errors,s2xx,s3xx,s4xx,s5xx,rps,p50,p95,p99,max,iterations,aborted,check_fails\n") {
+		t.Errorf("flow CSV = %q", b)
+	}
+	var rep struct {
+		Series []struct {
+			Iterations *int `json:"iterations"`
+		} `json:"series"`
+	}
+	json.Unmarshal(stdout.Bytes(), &rep)
+	n := 0
+	for _, r := range rep.Series {
+		if r.Iterations == nil {
+			t.Fatal("flow series row has no iterations key")
+		}
+		n += *r.Iterations
+	}
+	if n != 20 {
+		t.Errorf("series iterations add up to %d, want 20", n)
+	}
+}

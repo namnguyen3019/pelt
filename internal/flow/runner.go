@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
+	"github.com/namnguyen3019/pelt/internal/series"
 )
 
 // Options are the run settings after the file's load block and the
@@ -85,8 +86,12 @@ type Runner struct {
 
 	iterations  atomic.Int64 // iterations finished, whatever the outcome
 	checkFails  atomic.Int64
+	active      atomic.Int64 // users running: started and not gone
 	connsNew    atomic.Int64
 	connsReused atomic.Int64
+
+	// series counts per second; nil in a dry run.
+	series atomic.Pointer[series.Counters]
 }
 
 // New validates the options and prepares a Runner.
@@ -126,10 +131,24 @@ func New(sc *Scenario, opts Options) (*Runner, error) {
 // Options returns the validated options.
 func (r *Runner) Options() Options { return r.opts }
 
-// Progress reports iterations finished and failed checks so far. Safe to
-// call while Run is in progress.
-func (r *Runner) Progress() (iterations, checkFails int64) {
-	return r.iterations.Load(), r.checkFails.Load()
+// Progress is a snapshot of a run in progress, for the live line.
+type Progress struct {
+	Iterations int64
+	CheckFails int64
+	Active     int64
+	// LastSecond holds the counts of the last whole second.
+	LastSecond series.Count
+	Elapsed    time.Duration
+}
+
+// Progress reads the run so far. Safe to call while Run is in progress.
+func (r *Runner) Progress() Progress {
+	p := Progress{Iterations: r.iterations.Load(), CheckFails: r.checkFails.Load(), Active: r.active.Load()}
+	if c := r.series.Load(); c != nil {
+		p.Elapsed = time.Since(c.Start())
+		p.LastSecond = c.Get(int(p.Elapsed/time.Second) - 1)
+	}
+	return p
 }
 
 // Run executes the scenario and blocks until it ends.
@@ -151,12 +170,19 @@ func (r *Runner) Run(ctx context.Context) *Result {
 	recs := make([]*recorder, r.opts.Users)
 	var wg sync.WaitGroup
 	start := time.Now()
+	counters := series.NewCounters(start)
+	r.series.Store(counters)
+	sampler := series.StartSampler(start, func(time.Duration) series.Level {
+		return series.Level{Active: int(r.active.Load())}
+	})
 	for i := range recs {
 		recs[i] = newRecorder(r.sc)
 		v := r.newVU(i+1, recs[i])
 		wg.Add(1)
+		r.active.Add(1)
 		go func() {
 			defer wg.Done()
+			defer r.active.Add(-1)
 			v.run(reqCtx, stopCtx, jobs)
 		}()
 	}
@@ -173,6 +199,8 @@ func (r *Runner) Run(ctx context.Context) *Result {
 	res := merge(r.sc, recs)
 	res.Options = r.opts
 	res.Elapsed = elapsed
+	res.Series = series.Collect(counters, sampler, elapsed)
+	res.Series.Flow = true
 	res.Interrupted = ctx.Err() != nil
 	res.ConnsNew = r.connsNew.Load()
 	res.ConnsReused = r.connsReused.Load()

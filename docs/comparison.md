@@ -14,6 +14,7 @@ you describe user behaviour in Python. The two tools aim at different jobs:
 | Scaling out | One process uses every core; no distributed mode | One process per core (Python's GIL); `--processes` and master/worker mode, across many machines |
 | Throughput per process | About 54,600 req/s in the [sample run](usage.md#full-sample-output) | Up to about 16,000 req/s with `FastHttpUser` or 4,000 with `HttpUser`, best case, per Locust's docs |
 | Results | Percentiles, histogram, status codes, error kinds, connections opened vs reused | Live stats and charts, CSV export |
+| Over time | One row per second, already aggregated (requests, status classes, errors, p50 to p99): a Timeline in the terminal, `series` in JSON, CSV with `-series` | `--csv` appends the current 10-second window's stats to a history file |
 | Pass/fail for CI | `-threshold 'p95<300ms'` and the like (latency percentiles, errors, status codes, req/s), and in flow mode `thresholds` lists per flow and per step in the scenario file (plus failed checks and aborted iterations); exit 3 when one is missed, and 3 when nothing got a response | Exit 1 if any request failed; latency or ratio rules need a Python `quitting` hook that sets `process_exit_code` |
 | Protocols | HTTP and HTTPS | HTTP out of the box, any protocol with a custom client |
 

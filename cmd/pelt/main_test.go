@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/report"
+	"github.com/namnguyen3019/pelt/internal/series"
 )
 
 func TestHeaderFlag(t *testing.T) {
@@ -177,5 +182,50 @@ func TestFinishExitCodes(t *testing.T) {
 		if got := finish(tc.v, tc.interrupted, false, &stderr); got != tc.want {
 			t.Errorf("finish(passed=%v, interrupted=%v) = %d, want %d", tc.v.Passed(), tc.interrupted, got, tc.want)
 		}
+	}
+}
+
+func TestRunSeriesCSV(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "s.csv")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-n", "100", "-c", "5", "-series", path, srv.URL}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if !strings.HasPrefix(lines[0], "t,stage,target,active,requests,") || len(lines) < 2 {
+		t.Fatalf("CSV = %q", b)
+	}
+	total := 0
+	for _, l := range lines[1:] {
+		n, _ := strconv.Atoi(strings.Split(l, ",")[4])
+		total += n
+	}
+	if total != 100 {
+		t.Errorf("CSV rows add up to %d requests, want 100", total)
+	}
+
+	// A path that cannot be created fails before any load is sent.
+	hits.Store(0)
+	bad := filepath.Join(t.TempDir(), "missing", "s.csv")
+	if code := run([]string{"-n", "10", "-series", bad, srv.URL}, &stdout, &stderr); code != exitError {
+		t.Errorf("bad -series path: exit %d, want %d", code, exitError)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("server got %d requests after a bad -series path", hits.Load())
+	}
+}
+
+func TestProgressLine(t *testing.T) {
+	got := progressLine(loadtest.Progress{Completed: 12345, Errors: 3, LastSecond: series.Count{Requests: 1402}})
+	if want := "12,345 requests, 1,402 req/s last second, 3 errors"; got != want {
+		t.Errorf("progress line = %q, want %q", got, want)
 	}
 }

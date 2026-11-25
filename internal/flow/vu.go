@@ -104,7 +104,12 @@ func (v *vu) run(reqCtx, stopCtx context.Context, jobs <-chan struct{}) {
 	for range jobs {
 		v.iteration++
 		fl := v.r.pick(v.rng.IntN(v.r.cumWeight[len(v.r.cumWeight)-1]))
-		v.runFlow(reqCtx, stopCtx, fl, true)
+		out := v.runFlow(reqCtx, stopCtx, fl, true)
+		// The series counts iterations that ended on their own, completed
+		// or aborted; one cut by the end of the run did not finish.
+		if c := v.r.series.Load(); c != nil && out != cut {
+			c.Iteration(c.Now(), out == failed)
+		}
 		v.r.iterations.Add(1)
 	}
 }
@@ -241,6 +246,7 @@ func (v *vu) do(ctx context.Context, st *Step) *StepTrace {
 	if err != nil {
 		t.Err = err
 		sr.recordError(err)
+		v.countError()
 		v.emit(t)
 		return t
 	}
@@ -279,13 +285,20 @@ func (v *vu) do(ctx context.Context, st *Step) *StepTrace {
 		} else {
 			t.Err = err
 			sr.recordError(err)
+			v.countError()
 		}
 		v.emit(t)
 		return t
 	}
 
 	t.Status = resp.StatusCode
-	sr.recordResponse(resp.StatusCode, t.Latency, t.Bytes)
+	finish := uint32(0)
+	c := v.r.series.Load()
+	if c != nil {
+		finish = c.Now()
+		c.Response(finish, resp.StatusCode)
+	}
+	sr.recordResponse(resp.StatusCode, t.Latency, finish, t.Bytes)
 
 	if len(st.Status) > 0 && !slices.Contains(st.Status, resp.StatusCode) {
 		t.CheckErr = fmt.Errorf("status %d, want %s", resp.StatusCode, statusWant(st.Status))
@@ -303,9 +316,19 @@ func (v *vu) do(ctx context.Context, st *Step) *StepTrace {
 	if t.Failed() {
 		sr.CheckFails++
 		v.r.checkFails.Add(1)
+		if c != nil {
+			c.CheckFail(finish)
+		}
 	}
 	v.emit(t)
 	return t
+}
+
+// countError adds a transport error to the per-second counts.
+func (v *vu) countError() {
+	if c := v.r.series.Load(); c != nil {
+		c.Error(c.Now())
+	}
 }
 
 func (v *vu) emit(t *StepTrace) {

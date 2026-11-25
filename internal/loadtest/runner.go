@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/namnguyen3019/pelt/internal/series"
 )
 
 // Runner executes a load test. Create one with New and call Run once.
@@ -28,8 +30,12 @@ type Runner struct {
 	trace  *httptrace.ClientTrace
 
 	completed   atomic.Int64 // requests that finished (success or error)
+	inFlight    atomic.Int64 // requests sent and not yet finished
 	connsNew    atomic.Int64 // TCP connections dialled
 	connsReused atomic.Int64 // requests sent on an already-used connection
+
+	// counters is set when Run starts; until then progress reads nothing.
+	counters atomic.Pointer[series.Counters]
 }
 
 // New validates cfg and prepares a Runner.
@@ -73,6 +79,32 @@ func (r *Runner) Config() Config { return r.cfg }
 // call from another goroutine while Run is in progress.
 func (r *Runner) Completed() int64 { return r.completed.Load() }
 
+// Progress is a snapshot of a run in progress, for the live line.
+type Progress struct {
+	Completed int64
+	Errors    int64
+	// LastSecond holds the counts of the last whole second, and Elapsed
+	// the time since the start.
+	LastSecond series.Count
+	Elapsed    time.Duration
+}
+
+// Progress reads the run so far. It is safe to call while Run is going.
+func (r *Runner) Progress() Progress {
+	p := Progress{Completed: r.completed.Load()}
+	c := r.counters.Load()
+	if c == nil {
+		return p
+	}
+	p.Elapsed = time.Since(c.Start())
+	now := int(p.Elapsed / time.Second)
+	for t := 0; t <= now; t++ {
+		p.Errors += int64(c.Get(t).Errors)
+	}
+	p.LastSecond = c.Get(now - 1)
+	return p
+}
+
 // Run executes the test and blocks until it finishes or ctx is cancelled.
 //
 // Two kinds of stop exist:
@@ -105,6 +137,11 @@ func (r *Runner) Run(ctx context.Context) *Result {
 	recorders := make([]*recorder, r.cfg.Concurrency)
 	var wg sync.WaitGroup
 	start := time.Now()
+	counters := series.NewCounters(start)
+	r.counters.Store(counters)
+	sampler := series.StartSampler(start, func(time.Duration) series.Level {
+		return series.Level{Active: int(r.inFlight.Load())}
+	})
 
 	for i := range recorders {
 		rec := newRecorder(perWorker)
@@ -113,7 +150,9 @@ func (r *Runner) Run(ctx context.Context) *Result {
 		go func() {
 			defer wg.Done()
 			for range jobs { // exits when the dispatcher closes jobs
-				r.do(reqCtx, rec)
+				r.inFlight.Add(1)
+				r.do(reqCtx, rec, counters)
+				r.inFlight.Add(-1)
 			}
 		}()
 	}
@@ -124,6 +163,7 @@ func (r *Runner) Run(ctx context.Context) *Result {
 
 	res := merge(recorders)
 	res.Elapsed = elapsed
+	res.Series = series.Collect(counters, sampler, elapsed)
 	res.Interrupted = ctx.Err() != nil
 	res.ConnsNew = r.connsNew.Load()
 	res.ConnsReused = r.connsReused.Load()
@@ -171,10 +211,11 @@ func (r *Runner) dispatch(ctx context.Context, jobs chan<- struct{}) {
 // do sends one request and records the outcome in rec. Latency is measured
 // from just before the request is sent until the whole body has been read,
 // which is what a real client experiences.
-func (r *Runner) do(ctx context.Context, rec *recorder) {
+func (r *Runner) do(ctx context.Context, rec *recorder, counters *series.Counters) {
 	req, err := r.newRequest(ctx)
 	if err != nil {
 		rec.recordError(err)
+		counters.Error(counters.Now())
 		r.completed.Add(1)
 		return
 	}
@@ -189,7 +230,10 @@ func (r *Runner) do(ctx context.Context, rec *recorder) {
 		n, err = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if err == nil {
-			rec.recordSuccess(resp.StatusCode, time.Since(start), n)
+			latency := time.Since(start)
+			finish := counters.Now()
+			rec.recordSuccess(resp.StatusCode, latency, finish, n)
+			counters.Response(finish, resp.StatusCode)
 			r.completed.Add(1)
 			return
 		}
@@ -202,6 +246,7 @@ func (r *Runner) do(ctx context.Context, rec *recorder) {
 		return
 	}
 	rec.recordError(err)
+	counters.Error(counters.Now())
 	r.completed.Add(1)
 }
 

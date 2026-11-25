@@ -425,3 +425,37 @@ func TestDryRun(t *testing.T) {
 		t.Errorf("failure not shown:\n%s", out.String())
 	}
 }
+
+func TestSeriesCountsFlowRun(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	sc := load(t, shopScenario, srv.URL)
+	res := runScenario(t, sc, Options{Users: 3, Duration: 1200 * time.Millisecond})
+
+	if !res.Series.Flow || len(res.Series.Counts) != 2 {
+		t.Fatalf("series = flow %v, %d rows; want flow and 2 rows", res.Series.Flow, len(res.Series.Counts))
+	}
+	tot := res.Totals()
+	_, completed, aborted, _ := res.Iterations()
+	var req, resp, iters, ab int
+	for _, c := range res.Series.Counts {
+		req += c.Requests
+		resp += c.Responses
+		iters += c.Iterations
+		ab += c.Aborted
+	}
+	if req != tot.Total || resp != tot.Successes {
+		t.Errorf("series sums %d requests, %d responses; run has %d, %d", req, resp, tot.Total, tot.Successes)
+	}
+	if iters != completed+aborted || ab != aborted {
+		t.Errorf("series has %d iterations (%d aborted), run has %d completed + %d aborted", iters, ab, completed, aborted)
+	}
+	for i := range res.Steps {
+		if len(res.Steps[i].Finish) != len(res.Steps[i].Latencies) {
+			t.Errorf("step %d: %d finish times for %d latencies", i, len(res.Steps[i].Finish), len(res.Steps[i].Latencies))
+		}
+	}
+	if res.Series.Levels[0].Active != 3 {
+		t.Errorf("active users after 1 s = %d, want 3", res.Series.Levels[0].Active)
+	}
+}
