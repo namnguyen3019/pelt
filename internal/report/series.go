@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/namnguyen3019/pelt/internal/series"
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 // timelineRows is the most rows the text Timeline shows. Every second is
@@ -24,16 +26,17 @@ const timelineMinSeconds = 3
 type timeline struct {
 	width int // seconds per row
 	spans []series.Range
+	plan  *stages.Plan // nil without stages
 }
 
 // newTimeline adds up s into at most timelineRows spans. It needs the
 // grouped latencies, so it runs before s.Release.
-func newTimeline(s *series.Series) timeline {
+func newTimeline(s *series.Series, plan *stages.Plan) timeline {
 	if len(s.Rows) < timelineMinSeconds {
 		return timeline{}
 	}
 	width, bounds := series.Slices(len(s.Rows), timelineRows)
-	tl := timeline{width: width}
+	tl := timeline{width: width, plan: plan}
 	for _, b := range bounds {
 		tl.spans = append(tl.spans, s.Range(b[0], b[1]))
 	}
@@ -65,7 +68,7 @@ func writeTimeline(b *strings.Builder, s *series.Series, tl timeline) {
 	for _, sp := range tl.spans {
 		row := []string{fmt.Sprintf("%d-%ds", sp.From, sp.To)}
 		if s.Staged {
-			row = append(row, trimFloat(s.Rows[sp.To-1].Target))
+			row = append(row, targetCell(tl.plan, meanTarget(s.Rows[sp.From:sp.To])))
 		}
 		row = append(row, groupInt(int64(math.Round(sp.RPS()))))
 		if s.Flow {
@@ -86,13 +89,23 @@ func writeTimeline(b *strings.Builder, s *series.Series, tl timeline) {
 	writeTable(b, rows)
 }
 
+// meanTarget is the average stage target over rows, which is what the
+// span's req/s should be read against.
+func meanTarget(rows []series.Row) float64 {
+	sum := 0.0
+	for _, r := range rows {
+		sum += r.Target
+	}
+	return sum / float64(max(len(rows), 1))
+}
+
 // writeTable prints rows with the first column left-aligned and the rest
 // right-aligned, two spaces apart, indented by two.
 func writeTable(b *strings.Builder, rows [][]string) {
 	widths := make([]int, len(rows[0]))
 	for _, r := range rows {
 		for i, c := range r {
-			widths[i] = max(widths[i], len(c))
+			widths[i] = max(widths[i], utf8.RuneCountInString(c))
 		}
 	}
 	for _, r := range rows {

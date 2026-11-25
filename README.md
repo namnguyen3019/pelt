@@ -59,6 +59,17 @@ exits 3 if any is missed:
 pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
 ```
 
+To see where a service starts to struggle, ramp the load up and down. Each
+second's rate, latency and errors land in a Timeline, in JSON and, with
+`-series out.csv`, in a CSV file:
+
+```sh
+pelt -stages 30s:200,2m:200,30s:0 -series out.csv https://staging.example.com/
+```
+
+More: [load stages](docs/usage.md#load-stages) and
+[per-second results](docs/usage.md#per-second-results).
+
 Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
 files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
 
@@ -66,12 +77,13 @@ For multi-step journeys, describe them in a JSON file and run it:
 
 ```sh
 pelt run examples/shop.json -u 50 -d 1m
+pelt run examples/shop.json -stages 1m:100,5m:100,1m:0   # ramp users up, hold, ramp down
 ```
 
 Each virtual user logs in once, keeps its own cookies, and loops through
 weighted flows, carrying values such as a token or an order id from one
-request to the next. The file format, captures and report:
-[docs/flows.md](docs/flows.md).
+request to the next. The file format, captures, [load stages](docs/flows.md#load-stages)
+and report: [docs/flows.md](docs/flows.md).
 
 ## Pelt vs Locust
 

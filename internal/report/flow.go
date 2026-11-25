@@ -12,6 +12,7 @@ import (
 	"github.com/namnguyen3019/pelt/internal/flow"
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/series"
+	"github.com/namnguyen3019/pelt/internal/stages"
 	"github.com/namnguyen3019/pelt/internal/stats"
 	"github.com/namnguyen3019/pelt/internal/threshold"
 )
@@ -32,6 +33,7 @@ type FlowReport struct {
 	verdict Verdict
 	ser     *series.Series
 	tl      timeline
+	stages  []stageResult
 
 	// all holds every response latency, sorted, for run-level latency
 	// thresholds. It is built on first use.
@@ -51,7 +53,8 @@ func NewFlow(res *flow.Result) *FlowReport {
 		sets[i] = series.Samples{Latencies: res.Steps[i].Latencies, Finish: res.Steps[i].Finish}
 	}
 	r.ser = series.Build(res.Series, sets...)
-	r.tl = newTimeline(r.ser)
+	r.tl = newTimeline(r.ser, res.Options.Stages)
+	r.stages = newStageResults(r.ser, res.Options.Stages)
 	r.ser.Release()
 	for i := range res.Steps {
 		r.steps = append(r.steps, stats.Summarize(res.Steps[i].Latencies, stepPercentiles))
@@ -252,6 +255,7 @@ func (r *FlowReport) WriteText(w io.Writer) error {
 		b.WriteString("\n")
 	}
 
+	writeStages(&b, opts.Stages, r.stages, true)
 	writeTimeline(&b, r.ser, r.tl)
 
 	if len(tot.StatusCodes) > 0 {
@@ -283,6 +287,13 @@ func (r *FlowReport) WriteText(w io.Writer) error {
 func (r *FlowReport) WriteSeriesCSV(w io.Writer) error { return writeSeriesCSV(w, r.ser) }
 
 func describeFlowLoad(o flow.Options) string {
+	if p := o.Stages; p != nil {
+		parts := []string{"user stages " + p.String() + " over " + stages.Dur(p.Total())}
+		if o.Iterations > 0 {
+			parts = append(parts, fmt.Sprintf("stop at %d iterations", o.Iterations))
+		}
+		return strings.Join(append(parts, fmt.Sprintf("seed %d", o.Seed)), ", ")
+	}
 	parts := []string{fmt.Sprintf("%d users", o.Users)}
 	var limits []string
 	if o.Iterations > 0 {
@@ -340,6 +351,8 @@ type jsonFlowReport struct {
 	Flows          []jsonFlow      `json:"flows"`
 	Steps          []jsonStep      `json:"steps"`
 	Thresholds     []jsonThreshold `json:"thresholds,omitempty"`
+	StagesSpec     string          `json:"stages_configured,omitempty"`
+	Stages         []jsonStage     `json:"stages,omitempty"`
 	Series         []jsonSeriesRow `json:"series"`
 }
 
@@ -429,7 +442,11 @@ func (r *FlowReport) WriteJSON(w io.Writer) error {
 		Flows:          []jsonFlow{},
 		Steps:          []jsonStep{},
 		Thresholds:     toJSONThresholds(r.verdict),
+		Stages:         toJSONStages(r.stages, true),
 		Series:         toJSONSeries(r.ser),
+	}
+	if opts.Stages != nil {
+		out.StagesSpec = opts.Stages.String()
 	}
 	if opts.Duration > 0 {
 		out.Duration = opts.Duration.String()

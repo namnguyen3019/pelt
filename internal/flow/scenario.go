@@ -21,6 +21,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 // Scenario is a loaded, checked and compiled scenario file.
@@ -48,6 +50,9 @@ type Load struct {
 	Duration   time.Duration
 	Iterations int
 	Timeout    time.Duration
+	// Stages move the number of users over the run; nil without a
+	// load.stages list. They replace Users and Duration.
+	Stages *stages.Plan
 }
 
 // Flow is a weighted list of steps run in order.
@@ -100,10 +105,18 @@ type fileScenario struct {
 }
 
 type fileLoad struct {
-	Users      int    `json:"users"`
-	Duration   string `json:"duration"`
-	Iterations int    `json:"iterations"`
-	Timeout    string `json:"timeout"`
+	Users      int               `json:"users"`
+	Duration   string            `json:"duration"`
+	Iterations int               `json:"iterations"`
+	Timeout    string            `json:"timeout"`
+	Stages     []json.RawMessage `json:"stages"`
+}
+
+// fileStage is one entry of load.stages.
+type fileStage struct {
+	Duration *string `json:"duration"`
+	Users    *int    `json:"users"`
+	Name     string  `json:"name"`
 }
 
 type fileDefaults struct {
@@ -276,6 +289,11 @@ func compile(f *fileScenario, dir string, raw []byte) (*Scenario, error) {
 	}
 	if sc.Load.Timeout, err = parseDuration(f.Load.Timeout); err != nil {
 		return nil, fmt.Errorf("load.timeout: %w", err)
+	}
+	if f.Load.Stages != nil {
+		if sc.Load.Stages, err = fileStages(f.Load, raw); err != nil {
+			return nil, err
+		}
 	}
 
 	// data
@@ -595,6 +613,72 @@ func parseThink(s string) (Think, error) {
 		return Think{}, fmt.Errorf("%q: durations must be positive, low then high", s)
 	}
 	return Think{Min: a, Max: b}, nil
+}
+
+// fileStages compiles load.stages. Errors point at the stage's line and
+// column. A stages list replaces users and duration, so neither may be
+// set beside it.
+func fileStages(fl fileLoad, raw []byte) (*stages.Plan, error) {
+	where := locateKey(raw, "stages")
+	switch {
+	case fl.Users != 0:
+		return nil, fmt.Errorf("%sload: use stages or users, not both; the highest stage is the number of users", where)
+	case fl.Duration != "":
+		return nil, fmt.Errorf("%sload: use stages or duration, not both; the stages add up to the run length", where)
+	case len(fl.Stages) == 0:
+		return nil, fmt.Errorf("%sload.stages is empty; give at least one {\"duration\": \"1m\", \"users\": 10}", where)
+	}
+	list := make([]stages.Stage, 0, len(fl.Stages))
+	for i, msg := range fl.Stages {
+		at := where
+		if off := bytes.Index(raw, msg); off >= 0 {
+			at = lineCol(raw, off)
+		}
+		fail := func(format string, a ...any) error {
+			return fmt.Errorf("%sload.stages[%d]: %s", at, i, fmt.Sprintf(format, a...))
+		}
+		var fs fileStage
+		dec := json.NewDecoder(bytes.NewReader(msg))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&fs); err != nil {
+			return nil, fail("%s (want {\"duration\": \"1m\", \"users\": 10, \"name\": \"optional\"})", strings.TrimPrefix(err.Error(), "json: "))
+		}
+		if fs.Duration == nil {
+			return nil, fail("duration is required, such as \"30s\" (\"0s\" jumps)")
+		}
+		if fs.Users == nil {
+			return nil, fail("users is required")
+		}
+		d, err := parseDuration(*fs.Duration)
+		if err != nil || *fs.Duration == "" {
+			return nil, fail("duration %q is not a duration like 30s or 2m", *fs.Duration)
+		}
+		if *fs.Users < 0 {
+			return nil, fail("users cannot be negative")
+		}
+		list = append(list, stages.Stage{Duration: d, Target: float64(*fs.Users), Name: fs.Name})
+	}
+	p, err := stages.New(stages.Level, list)
+	if err != nil {
+		return nil, fmt.Errorf("%sload.stages: %w", where, err)
+	}
+	return &p, nil
+}
+
+// locateKey returns "line N, column M: " for the first "key": in raw, or
+// "" if there is none.
+func locateKey(raw []byte, key string) string {
+	off := bytes.Index(raw, []byte(`"`+key+`"`))
+	if off < 0 {
+		return ""
+	}
+	return lineCol(raw, off)
+}
+
+func lineCol(raw []byte, off int) string {
+	line := 1 + bytes.Count(raw[:off], []byte("\n"))
+	col := off - bytes.LastIndexByte(raw[:off], '\n')
+	return fmt.Sprintf("line %d, column %d: ", line, col)
 }
 
 func parseDuration(s string) (time.Duration, error) {

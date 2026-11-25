@@ -12,6 +12,7 @@ import (
 
 	"github.com/namnguyen3019/pelt/internal/loadtest"
 	"github.com/namnguyen3019/pelt/internal/series"
+	"github.com/namnguyen3019/pelt/internal/stages"
 	"github.com/namnguyen3019/pelt/internal/stats"
 	"github.com/namnguyen3019/pelt/internal/threshold"
 )
@@ -28,6 +29,7 @@ type Report struct {
 	verdict Verdict
 	ser     *series.Series
 	tl      timeline
+	stages  []stageResult
 }
 
 // New computes statistics for res. It takes ownership of res.Latencies
@@ -37,7 +39,8 @@ func New(cfg loadtest.Config, res *loadtest.Result) *Report {
 	// The series and histogram first: the series needs each latency next
 	// to its finish time, and Summarize sorts the latencies in place.
 	r.ser = series.Build(res.Series, series.Samples{Latencies: res.Latencies, Finish: res.Finish})
-	r.tl = newTimeline(r.ser)
+	r.tl = newTimeline(r.ser, cfg.Stages)
+	r.stages = newStageResults(r.ser, cfg.Stages)
 	r.ser.Release()
 	r.hist = stats.Histogram(res.Latencies, histogramBuckets)
 	r.latency = stats.Summarize(res.Latencies, stats.DefaultPercentiles)
@@ -131,6 +134,7 @@ func (r *Report) WriteText(w io.Writer) error {
 		writeHistogram(&b, r.hist)
 	}
 
+	writeStages(&b, cfg.Stages, r.stages, false)
 	writeTimeline(&b, r.ser, r.tl)
 
 	if len(res.StatusCodes) > 0 {
@@ -161,6 +165,9 @@ func (r *Report) WriteText(w io.Writer) error {
 }
 
 func describeLoad(cfg loadtest.Config) string {
+	if plan := cfg.Stages; plan != nil {
+		return describeStages(cfg, plan)
+	}
 	var parts []string
 	if cfg.Requests > 0 {
 		parts = append(parts, fmt.Sprintf("%d requests", cfg.Requests))
@@ -176,6 +183,28 @@ func describeLoad(cfg loadtest.Config) string {
 		parts = append(parts, fmt.Sprintf("rate limit %s req/s", trimFloat(cfg.RateLimit)))
 	} else {
 		parts = append(parts, "no rate limit")
+	}
+	if cfg.Untuned {
+		parts = append(parts, "untuned transport")
+	}
+	return strings.Join(parts, ", ")
+}
+
+// describeStages is the Load line for a staged run: what the stages move,
+// the stages themselves, and the knob that stays a cap.
+func describeStages(cfg loadtest.Config, plan *stages.Plan) string {
+	var parts []string
+	if plan.Kind == stages.Rate {
+		parts = append(parts, "rate stages "+plan.String()+" over "+stages.Dur(plan.Total()),
+			fmt.Sprintf("at most %d in flight", cfg.Concurrency))
+	} else {
+		parts = append(parts, "concurrency stages "+plan.String()+" over "+stages.Dur(plan.Total()))
+		if cfg.RateLimit > 0 {
+			parts = append(parts, fmt.Sprintf("rate limit %s req/s", trimFloat(cfg.RateLimit)))
+		}
+	}
+	if cfg.Requests > 0 {
+		parts = append(parts, fmt.Sprintf("stop at %d requests", cfg.Requests))
 	}
 	if cfg.Untuned {
 		parts = append(parts, "untuned transport")
@@ -251,6 +280,8 @@ type jsonReport struct {
 	StatusCodes    map[string]int  `json:"status_codes"`
 	ErrorBreakdown map[string]int  `json:"error_breakdown"`
 	Thresholds     []jsonThreshold `json:"thresholds,omitempty"`
+	StagesSpec     string          `json:"stages_configured,omitempty"`
+	Stages         []jsonStage     `json:"stages,omitempty"`
 	Series         []jsonSeriesRow `json:"series"`
 }
 
@@ -291,7 +322,11 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		StatusCodes:    map[string]int{},
 		ErrorBreakdown: res.Errors,
 		Thresholds:     toJSONThresholds(r.verdict),
+		Stages:         toJSONStages(r.stages, false),
 		Series:         toJSONSeries(r.ser),
+	}
+	if cfg.Stages != nil {
+		out.StagesSpec = cfg.Stages.String()
 	}
 	if cfg.Duration > 0 {
 		out.Duration = cfg.Duration.String()

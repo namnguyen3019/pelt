@@ -29,10 +29,12 @@ pelt [flags] <url>
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-n` | 200 | Total requests. `0` means no limit (needs `-d`). |
+| `-n` | 200 | Total requests. `0` means no limit (needs `-d` or stages). |
 | `-d` | off | Run for this long, e.g. `30s`. Without an explicit `-n`, runs for the full duration. |
 | `-c` | 50 | Concurrency: number of worker goroutines, i.e. max requests in flight. |
 | `-rate` | 0 | Max requests per second across all workers. `0` is unlimited. |
+| `-stages` | | Change the load over the run, e.g. `30s:200,2m:200,30s:0`. Sets the run length. See [Load stages](#load-stages). |
+| `-ramp` | | Ramp concurrency from 0 up to `-c` over this long, then hold for the rest of `-d`. |
 | `-m` | GET | HTTP method. |
 | `-H` | | Header as `'Name: value'`. Repeat for more. A `Host` header sets the Host. |
 | `-body` | | Request body. |
@@ -42,7 +44,7 @@ pelt [flags] <url>
 | `-series` | | Also write one row per second of the run to this CSV file. See [Per-second results](#per-second-results). |
 | `-http2` | false | Allow HTTP/2 over TLS. By default the tool forces HTTP/1.1. |
 | `-untuned` | false | Use Go's stock connection pool limits, to see why tuning matters. |
-| `-quiet` | false | Hide the live progress line (only shown on a terminal): requests so far, req/s in the last whole second, errors so far. |
+| `-quiet` | false | Hide the live progress line (only shown on a terminal): requests so far, req/s in the last whole second, errors so far. With stages it shows the stage, its target now and requests in flight instead. |
 | `-threshold` | | Pass/fail target such as `'p95<300ms'` or `'errors<1%'`. Repeat for more. A missed target exits 3. See [Thresholds](#thresholds). |
 
 ## Examples
@@ -51,10 +53,95 @@ pelt [flags] <url>
 # 30 seconds at a steady 2,000 req/s
 pelt -d 30s -c 200 -rate 2000 http://127.0.0.1:8080/
 
+# ramp up to 200 in flight over 30 seconds, hold 2 minutes, ramp down
+pelt -stages 30s:200,2m:200,30s:0 http://127.0.0.1:8080/
+
 # POST JSON, machine-readable output
 pelt -n 5000 -c 100 -m POST -H 'Content-Type: application/json' \
   -body '{"hello":"world"}' -o json http://127.0.0.1:8080/api | jq .latency_ms
 ```
+
+## Load stages
+
+By default a run holds one level from start to end. Stages change it over
+the run: ramp up, hold, ramp down, or step from one level to another. Use
+them to find the load where a service starts to struggle, to warm a cache
+before the part you measure, or to see whether it recovers once the load
+drops. Flow mode takes stages too, moving the number of users; see
+[flow load stages](flows.md#load-stages).
+
+```sh
+pelt -stages 30s:200,2m:200,30s:0 https://api.example.com/        # 0 → 200 in flight, hold, → 0
+pelt -stages 1m:500/s,5m:500/s -c 300 https://api.example.com/    # 0 → 500 req/s, at most 300 in flight
+pelt -stages 0s:50,1m:50,0s:150,1m:150 https://api.example.com/   # 50 for a minute, then 150
+pelt -ramp 30s -c 200 -d 3m https://api.example.com/              # same as -stages 30s:200,2m30s:200
+```
+
+A stage is `duration:target`. The level moves in a straight line from the
+previous stage's target to this one over the duration. The run starts at 0,
+so `30s:200` ramps from 0 to 200, and a `0s` stage jumps straight to its
+target.
+
+- **A bare number moves concurrency**: requests in flight. Pelt starts as many
+  workers as the highest target and sends a request only while fewer than
+  the target are in flight. On a ramp-down, requests already in flight finish;
+  none is cut. `-rate` still caps the rate.
+- **A number with `/s` moves the request rate.** Requests go out on a schedule
+  that follows the curve, so `2s:100/s` sends 100 requests in all. `-c`
+  caps requests in flight; if the series shows `req/s` below `target`, raise
+  it.
+- **The stages set the run length.** `-n` still stops the run early, and its
+  default of 200 is dropped, as with `-d`.
+
+Each of these exits 2 before any load is sent: `-stages` with `-d` or
+`-ramp`; concurrency stages with `-c`; rate stages with `-rate`; a mix of
+`100` and `500/s` in one list; a negative target; a stage without a
+duration; or stages that add up to 0s. `-ramp` needs `-d` and goes up only;
+use `-stages` for a ramp-down.
+
+Thresholds are measured over the whole run, ramps included, exactly as
+without stages.
+
+The report gains a Stages block, one row per stage, and the Timeline gains
+a `target` column:
+
+```text
+Load:         concurrency stages 3s:100,4s:100,3s:0 over 10s
+...
+Stages:
+  stage    time     target  requests   req/s  p95 ms  errors
+  1       0s-3s    0 → 100    18,428   6,143  10.411       0
+  2       3s-7s  100 → 100    49,563  12,391  10.413       0
+  3      7s-10s    100 → 0    18,601   6,200  10.419       0
+
+Timeline (1 second per row):
+  time    target   req/s  p95 ms  errors  5xx
+  0-1s        17   2,019  10.417       0    0
+  1-2s        50   6,155  10.367       0    0
+  2-3s        83  10,254  10.444       0    0
+  3-4s       100  12,416  10.364       0    0
+  ...
+```
+
+A second belongs to the stage in effect at its midpoint, and the `target`
+shown is the target there, so on a ramp it is the second's average. Requests
+that finish after the last stage ends count in the last stage. A `0s` stage
+owns no seconds and shows `-`.
+
+In JSON, `stages_configured` holds the list as given and `stages` has one
+object per stage:
+
+```json
+"stages": [
+  {"stage": 1, "name": "", "from": 0, "target": 100, "start_s": 0, "end_s": 3,
+   "requests": 18414, "responses": 18414, "errors": 0, "rps": 6138,
+   "p50_ms": 8.103, "p95_ms": 10.428, "p99_ms": 10.987}
+]
+```
+
+The live line shows the stage, its target now, requests in flight, last
+second's rate and errors so far:
+`stage 2/3  target 100  active 100  12,416 req/s  0 errors`.
 
 ## Thresholds
 
@@ -176,7 +263,7 @@ t,stage,target,active,requests,responses,errors,s2xx,s3xx,s4xx,s5xx,rps,p50,p95,
 | Column | Meaning |
 |--------|---------|
 | `t` | Second since the start: 0, 1, 2 ... |
-| `stage`, `target` | Reserved for load stages; empty (`null` in JSON) for now |
+| `stage`, `target` | With [load stages](#load-stages): the stage and its target in the middle of the second. Empty (`null` in JSON) without stages. |
 | `active` | Requests in flight at the end of the second |
 | `requests`, `responses`, `errors` | Requests that finished; those that got a response; transport errors |
 | `s2xx` ... `s5xx` | Responses by status class |
@@ -194,7 +281,7 @@ about 100 bytes per second of run.
 |------|---------|
 | `0` | Finished, and every threshold passed |
 | `1` | Runtime error, for example an unreadable `-body-file` or a `-series` file that cannot be created |
-| `2` | Bad flags, config or threshold; nothing was sent |
+| `2` | Bad flags, config, stages or threshold; nothing was sent |
 | `3` | A threshold was missed, or no request got a response (in flow mode, no iteration completed) |
 | `130` | Interrupted with Ctrl-C (report still printed, thresholds still shown) |
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptrace"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/namnguyen3019/pelt/internal/series"
+	"github.com/namnguyen3019/pelt/internal/stages"
 )
 
 // Runner executes a load test. Create one with New and call Run once.
@@ -36,7 +38,17 @@ type Runner struct {
 
 	// counters is set when Run starts; until then progress reads nothing.
 	counters atomic.Pointer[series.Counters]
+
+	// freed wakes the dispatcher when a request finishes, so a level stage's
+	// gate opens as soon as there is room. Buffered by one; workers never
+	// block on it. Nil without level stages.
+	freed chan struct{}
 }
+
+// gateTick is how often the dispatcher looks at the stage target again
+// while it waits, so a rising target is picked up without a request
+// having to finish first.
+const gateTick = 100 * time.Millisecond
 
 // New validates cfg and prepares a Runner.
 func New(cfg Config) (*Runner, error) {
@@ -44,6 +56,9 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 	r := &Runner{cfg: cfg}
+	if cfg.Stages != nil && cfg.Stages.Kind == stages.Level {
+		r.freed = make(chan struct{}, 1)
+	}
 	r.client = &http.Client{
 		Transport: newTransport(cfg),
 		Timeout:   cfg.Timeout,
@@ -87,16 +102,24 @@ type Progress struct {
 	// the time since the start.
 	LastSecond series.Count
 	Elapsed    time.Duration
+	// Active is requests in flight now. With stages, Stage is the stage in
+	// effect (1-based) and Target what it asks for now.
+	Active int64
+	Stage  int
+	Target float64
 }
 
 // Progress reads the run so far. It is safe to call while Run is going.
 func (r *Runner) Progress() Progress {
-	p := Progress{Completed: r.completed.Load()}
+	p := Progress{Completed: r.completed.Load(), Active: r.inFlight.Load()}
 	c := r.counters.Load()
 	if c == nil {
 		return p
 	}
 	p.Elapsed = time.Since(c.Start())
+	if plan := r.cfg.Stages; plan != nil {
+		p.Stage, p.Target = plan.StageAt(p.Elapsed), plan.Target(p.Elapsed)
+	}
 	now := int(p.Elapsed / time.Second)
 	for t := 0; t <= now; t++ {
 		p.Errors += int64(c.Get(t).Errors)
@@ -115,9 +138,13 @@ func (r *Runner) Progress() Progress {
 //     Interrupted set.
 func (r *Runner) Run(ctx context.Context) *Result {
 	dispatchCtx := ctx
-	if r.cfg.Duration > 0 {
+	length := r.cfg.Duration
+	if r.cfg.Stages != nil {
+		length = r.cfg.Stages.Total()
+	}
+	if length > 0 {
 		var cancel context.CancelFunc
-		dispatchCtx, cancel = context.WithTimeout(ctx, r.cfg.Duration)
+		dispatchCtx, cancel = context.WithTimeout(ctx, length)
 		defer cancel()
 	}
 
@@ -139,9 +166,7 @@ func (r *Runner) Run(ctx context.Context) *Result {
 	start := time.Now()
 	counters := series.NewCounters(start)
 	r.counters.Store(counters)
-	sampler := series.StartSampler(start, func(time.Duration) series.Level {
-		return series.Level{Active: int(r.inFlight.Load())}
-	})
+	sampler := series.StartSampler(start, r.level)
 
 	for i := range recorders {
 		rec := newRecorder(perWorker)
@@ -153,21 +178,42 @@ func (r *Runner) Run(ctx context.Context) *Result {
 				r.inFlight.Add(1)
 				r.do(reqCtx, rec, counters)
 				r.inFlight.Add(-1)
+				if r.freed != nil {
+					select {
+					case r.freed <- struct{}{}:
+					default:
+					}
+				}
 			}
 		}()
 	}
 
-	r.dispatch(dispatchCtx, jobs) // returns after closing jobs
+	r.dispatch(dispatchCtx, start, jobs) // returns after closing jobs
 	wg.Wait()
 	elapsed := time.Since(start)
 
 	res := merge(recorders)
 	res.Elapsed = elapsed
 	res.Series = series.Collect(counters, sampler, elapsed)
+	res.Series.Staged = r.cfg.Stages != nil
 	res.Interrupted = ctx.Err() != nil
 	res.ConnsNew = r.connsNew.Load()
 	res.ConnsReused = r.connsReused.Load()
 	return res
+}
+
+// level is what the sampler notes at the end of each second: requests in
+// flight and, with stages, the target and the stage at the second's
+// midpoint. The midpoint is the average target of a second on a ramp, and
+// it gives a second to one stage: a stage that starts at 10s owns second
+// 10, and the stage before it owns second 9.
+func (r *Runner) level(at time.Duration) series.Level {
+	lv := series.Level{Active: int(r.inFlight.Load())}
+	if plan := r.cfg.Stages; plan != nil {
+		mid := (at - 1).Truncate(time.Second) + time.Second/2
+		lv.Target, lv.Stage = plan.Target(mid), plan.StageAt(mid)
+	}
+	return lv
 }
 
 // dispatch hands out one job per request until the request count is reached
@@ -178,32 +224,82 @@ func (r *Runner) Run(ctx context.Context) *Result {
 // each send) keeps the long-run rate exact even when the timer fires late,
 // and it lets high rates work despite the OS timer's coarse resolution: if
 // we fall behind, the next few jobs go out back-to-back to catch up.
-func (r *Runner) dispatch(ctx context.Context, jobs chan<- struct{}) {
+//
+// Rate stages keep the absolute schedule, with a moving rate: request i is
+// due when the stages have asked for i+0.5 requests in all (the area under
+// the rate curve). Level stages add a gate: a job goes out only while
+// fewer requests are in flight than the stage asks for right now.
+func (r *Runner) dispatch(ctx context.Context, start time.Time, jobs chan<- struct{}) {
 	defer close(jobs)
 
 	var interval time.Duration
 	if r.cfg.RateLimit > 0 {
 		interval = time.Duration(float64(time.Second) / r.cfg.RateLimit)
 	}
+	plan := r.cfg.Stages
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
-	start := time.Now()
+	waitUntil := func(at time.Time) bool {
+		wait := time.Until(at)
+		if wait <= 0 {
+			return true
+		}
+		timer.Reset(wait) // safe since Go 1.23: no stale tick to drain
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
 
+	sent := int64(0)
 	for i := 0; r.cfg.Requests == 0 || i < r.cfg.Requests; i++ {
-		if interval > 0 {
-			if wait := time.Until(start.Add(time.Duration(i) * interval)); wait > 0 {
-				timer.Reset(wait) // safe since Go 1.23: no stale tick to drain
-				select {
-				case <-ctx.Done():
-					return
-				case <-timer.C:
-				}
+		if interval > 0 && !waitUntil(start.Add(time.Duration(i)*interval)) {
+			return
+		}
+		if plan != nil && plan.Kind == stages.Rate {
+			due, ok := plan.TimeFor(float64(i) + 0.5)
+			if !ok || !waitUntil(start.Add(due)) {
+				return
 			}
+		}
+		if plan != nil && plan.Kind == stages.Level && !r.gate(ctx, start, sent) {
+			return
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case jobs <- struct{}{}:
+			sent++
+		}
+	}
+}
+
+// gate waits until fewer requests are in flight than the level stage asks
+// for now. In flight is counted as jobs sent minus requests completed,
+// both known exactly here: a worker counts its own request as in flight
+// only after it picks the job up, which would let the dispatcher overshoot.
+// It reports false if ctx ends first.
+func (r *Runner) gate(ctx context.Context, start time.Time, sent int64) bool {
+	var tick *time.Ticker
+	for {
+		target := int64(math.Round(r.cfg.Stages.Target(time.Since(start))))
+		if sent-r.completed.Load() < target {
+			if tick != nil {
+				tick.Stop()
+			}
+			return true
+		}
+		if tick == nil {
+			tick = time.NewTicker(gateTick)
+			defer tick.Stop()
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-r.freed:
+		case <-tick.C:
 		}
 	}
 }

@@ -18,6 +18,22 @@ sleeping a fixed interval after each send, keeps the long-run rate exact even
 when the timer fires late, and lets high rates work despite coarse OS timer
 resolution: if the dispatcher falls behind, it catches up with a short burst.
 
+**Load stages.** With `-stages`, the dispatcher also follows a plan from
+`internal/stages`, a pure package that says what the target is at any
+moment. For rate stages it keeps the absolute schedule, with a moving rate:
+request *i* is due when the area under the rate curve reaches *i* + 0.5, a
+quadratic solved per stage. A ramp from 0 therefore starts at once instead
+of waiting for the rate to climb, and a stage at `0/s` is simply skipped
+over. For concurrency stages, Pelt starts as many workers as the highest
+target, and the dispatcher adds a gate: it sends a job only while jobs sent
+minus requests completed is below the target now. It counts both itself,
+because a worker counts its request only after picking the job up, which
+would let the dispatcher overshoot. When the gate is shut it waits for a
+worker to signal that a request finished (a channel buffered by one, so
+workers never block on it) or for a 100 ms tick, which picks up a rising
+target. The hot path gains one non-blocking send per request, and only with
+concurrency stages.
+
 **Worker pool.** `-c` goroutines `range` over `jobs`, so concurrency is
 bounded by construction: there can never be more than `-c` requests in
 flight. The channel is unbuffered on purpose. A job is handed over only when
@@ -100,6 +116,7 @@ internal/flow/       flow mode: scenario file, templates, captures, virtual user
 internal/testshop/   the small shop that testserver -app shop serves
 internal/stats/      percentiles, mean/stddev, histogram (pure functions)
 internal/series/     per-second counters, sampler, rows and spans (lock-free)
+internal/stages/     load stages: parse, target at a time, rate schedule (pure)
 internal/report/     text and JSON rendering, timeline and series CSV, threshold verdict
 internal/threshold/  parse threshold expressions, compare measured values (pure)
 ```
@@ -123,6 +140,12 @@ go test -race ./...
   boundary, a request finishing at 1.999 s landing in second 1, rows adding
   up to the run's totals, empty seconds having no percentiles, the partial
   last second, and timeline spans.
+- `internal/stages`: good and bad stage lists, the target at stage edges and
+  midpoints, `0s` jumps, the stage a moment belongs to, `-ramp`, and the
+  rate schedule against the area under the curve, across a `0/s` gap.
+- `internal/loadtest` with stages: requests in flight never above the
+  target on a ramp up and down, and none left at the end; a `2s:100/s` ramp
+  sends about 100 requests; `-n` still stops a staged run early.
 - `internal/threshold`: parsing every metric, unit and operator, rejected
   expressions with a readable reason, and the boundary where a value equals
   its target.
@@ -130,16 +153,23 @@ go test -race ./...
   the rule that a run with no responses fails, the Timeline, and stable
   series JSON keys and CSV columns.
 - `cmd/pelt`: end-to-end run of the CLI against a local server, exit code 3
-  for a missed threshold and for a dead target, and bad flag and threshold
-  handling.
+  for a missed threshold and for a dead target, bad flag and threshold
+  handling, exit 2 for every stage conflict with nothing sent, `-ramp`
+  building the same stages as its long form, and the `stages` JSON.
 - `internal/flow`: scenario parsing and errors, `thresholds` lists at every
   level and their scopes (with the line and column of a bad entry), templates
   and escaping, captures, weighted flow picks, and runs against the test shop: per-user
   cookies, chained captures, abort vs `on_fail: continue`, setup retries,
   duration and Ctrl-C cut-off, and the dry run.
+- `internal/flow` with stages: `load.stages` parsing and errors with their
+  line, setup once per user with cookies kept while users park and wake, a
+  ramp down to 0 that cuts no iteration, `-i` ending a staged run with users
+  parked, and the dry run ignoring stages.
 - `cmd/pelt` flow mode: `pelt run` end to end in text, JSON and dry-run,
   exit 3 and 0 for thresholds from the file and the command line,
-  `-no-thresholds`, and bad files, flags and threshold scopes.
+  `-no-thresholds`, bad files, flags and threshold scopes, exit 2 for every
+  stage conflict with nothing sent, stages from the file and from `-stages`,
+  and `-ramp` building the same stages as its long form.
 
 Thresholds are checked once, after the run, against the same numbers the
 report prints. `internal/threshold` only parses and compares; the report
@@ -153,10 +183,23 @@ gets its own `http.Client` and cookie jar on top of it and writes to its own
 recorder, which are merged after the run, so the hot path takes no locks.
 See [flows.md](flows.md#how-the-users-run).
 
+**Flow stages.** In flow mode stages move users, not requests, so the
+runner starts a goroutine for every user up to the highest target and lets
+the target decide which may run. A controller ticks every 100 ms and stores
+the target, rounded, in an atomic; when it changes, the controller closes a
+channel and swaps in a new one, which wakes every waiting user at once
+without a lock. User *n* runs setup the first time the target reaches *n*,
+so logins happen once per user. Between iterations, a user above the target
+parks on that channel, keeping its cookie jar, captures and random source,
+and resumes when the target rises again. A user above the target that is
+thinking stops thinking early; one in the middle of steps finishes them, so
+a ramp down cuts no iteration short. The dispatcher closes a channel once it
+stops handing out iterations, so parked users leave as soon as `-i` ends
+the run. Users count as active only while running setup or an iteration.
+
 ## Ideas for later
 
 - Open-loop mode that corrects for coordinated omission
 - HDR histogram for constant memory on very long runs
-- Ramp-up of workers over time (both modes)
 - Flow mode: a target-rate (open) model
 - Stopping a run early when a threshold is clearly missed
