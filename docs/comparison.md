@@ -10,7 +10,7 @@ you describe user behaviour in Python. The two tools aim at different jobs:
 | Install | One static binary, or `go install` | `pip install locust` (needs Python) |
 | Defining a test | Command-line flags for one URL, or a JSON file of weighted user flows with setup, captured values and per-user cookies ([flows](flows.md)) | Python code: user classes with tasks, so logins, loops, conditions and any Python library |
 | Load model | A pool of workers (`-c`) sending back to back, with an optional global rate cap; in flow mode, a fixed number of virtual users with think time | Simulated users with wait times, a spawn rate to ramp up, and custom load shapes |
-| Changing load over a run | `-stages 30s:200,2m:200,30s:0` moves concurrency or request rate in straight lines between targets, or `-ramp 30s` | A spawn rate, or a Python `LoadTestShape` class whose `tick()` returns users and spawn rate |
+| Changing load over a run | `-stages 30s:200,2m:200,30s:0` moves concurrency or request rate in straight lines between targets, or `-ramp 30s`; in flow mode, stages in the file or on the command line move the number of users | A spawn rate, or a Python `LoadTestShape` class whose `tick()` returns users and spawn rate |
 | Interface | Terminal: live progress line, then a text or JSON report | Web UI with live charts and load you can change mid-run; also runs headless |
 | Scaling out | One process uses every core; no distributed mode | One process per core (Python's GIL); `--processes` and master/worker mode, across many machines |
 | Throughput per process | About 54,600 req/s in the [sample run](usage.md#full-sample-output) | Up to about 16,000 req/s with `FastHttpUser` or 4,000 with `HttpUser`, best case, per Locust's docs |

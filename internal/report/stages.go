@@ -49,8 +49,9 @@ func newStageResults(s *series.Series, plan *stages.Plan) []stageResult {
 	return out
 }
 
-// writeStages prints the Stages block: one row per stage.
-func writeStages(b *strings.Builder, plan *stages.Plan, res []stageResult) {
+// writeStages prints the Stages block: one row per stage. Flow mode adds
+// iterations per second.
+func writeStages(b *strings.Builder, plan *stages.Plan, res []stageResult, flow bool) {
 	if len(res) == 0 {
 		return
 	}
@@ -63,7 +64,11 @@ func writeStages(b *strings.Builder, plan *stages.Plan, res []stageResult) {
 	if named {
 		head = append(head, "name")
 	}
-	head = append(head, "time", "target", "requests", "req/s", "p95 ms", "errors")
+	head = append(head, "time", "target", "requests", "req/s")
+	if flow {
+		head = append(head, "iter/s")
+	}
+	head = append(head, "p95 ms", "errors")
 	rows := [][]string{head}
 	for _, sr := range res {
 		row := []string{fmt.Sprint(sr.num)}
@@ -73,14 +78,21 @@ func writeStages(b *strings.Builder, plan *stages.Plan, res []stageResult) {
 		row = append(row,
 			fmt.Sprintf("%s-%s", secs(sr.startS), secs(sr.endS)),
 			fmt.Sprintf("%s → %s", plan.FormatTarget(sr.from), plan.FormatTarget(sr.stage.Target)))
-		if sr.r.Seconds == 0 {
-			row = append(row, "-", "-", "-", "-")
-		} else {
+		switch {
+		case sr.r.Seconds == 0:
+			for range len(head) - len(row) {
+				row = append(row, "-")
+			}
+		default:
 			p95 := "-"
 			if sr.r.Latency.Count > 0 {
 				p95 = ms(sr.r.Latency.P95)
 			}
-			row = append(row, groupInt(int64(sr.r.Requests)), groupInt(int64(math.Round(sr.r.RPS()))), p95, groupInt(int64(sr.r.Errors)))
+			row = append(row, groupInt(int64(sr.r.Requests)), groupInt(int64(math.Round(sr.r.RPS()))))
+			if flow {
+				row = append(row, fmt.Sprintf("%.1f", sr.r.IPS()))
+			}
+			row = append(row, p95, groupInt(int64(sr.r.Errors)))
 		}
 		rows = append(rows, row)
 	}
@@ -114,9 +126,13 @@ type jsonStage struct {
 	P50       *float64 `json:"p50_ms"`
 	P95       *float64 `json:"p95_ms"`
 	P99       *float64 `json:"p99_ms"`
+	// Flow mode only.
+	Iterations *int     `json:"iterations,omitempty"`
+	IPS        *float64 `json:"iterations_per_sec,omitempty"`
+	CheckFails *int     `json:"failed_checks,omitempty"`
 }
 
-func toJSONStages(res []stageResult) []jsonStage {
+func toJSONStages(res []stageResult, flow bool) []jsonStage {
 	if len(res) == 0 {
 		return nil
 	}
@@ -130,6 +146,10 @@ func toJSONStages(res []stageResult) []jsonStage {
 		}
 		if l := sr.r.Latency; l.Count > 0 {
 			j.P50, j.P95, j.P99 = msPtr(l.P50), msPtr(l.P95), msPtr(l.P99)
+		}
+		if flow {
+			it, ips, cf := sr.r.Iterations, round2(sr.r.IPS()), sr.r.CheckFails
+			j.Iterations, j.IPS, j.CheckFails = &it, &ips, &cf
 		}
 		out = append(out, j)
 	}

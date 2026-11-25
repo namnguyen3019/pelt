@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/namnguyen3019/pelt/internal/flow"
+	"github.com/namnguyen3019/pelt/internal/stages"
 	"github.com/namnguyen3019/pelt/internal/testshop"
 )
 
@@ -268,5 +272,137 @@ func TestRunFlowSeriesCSV(t *testing.T) {
 	}
 	if n != 20 {
 		t.Errorf("series iterations add up to %d, want 20", n)
+	}
+}
+
+// writeStagedShop is the shop scenario with load.stages in place of users
+// and duration.
+func writeStagedShop(t *testing.T, stagesJSON string) string {
+	t.Helper()
+	path := writeShopScenario(t)
+	src, _ := os.ReadFile(path)
+	s := strings.Replace(string(src), `"users": 20, "duration": "30s"`, `"stages": `+stagesJSON, 1)
+	if s == string(src) {
+		t.Fatal("shop.json load block changed; update writeStagedShop")
+	}
+	os.WriteFile(path, []byte(s), 0o644)
+	return path
+}
+
+// TestRunFlowStageConflicts checks that clashing load flags exit 2 before
+// any request is sent.
+func TestRunFlowStageConflicts(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	plain := writeShopScenario(t)
+	staged := writeStagedShop(t, `[{"duration": "1s", "users": 2}]`)
+	iterOnly := writeShopScenario(t)
+	src, _ := os.ReadFile(iterOnly)
+	os.WriteFile(iterOnly, []byte(strings.Replace(string(src), `"duration": "30s"`, `"iterations": 10`, 1)), 0o644)
+
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{plain, "-stages", "1s:2", "-ramp", "1s"}, "not both"},
+		{[]string{plain, "-stages", "1s:2", "-d", "5s"}, "drop -d"},
+		{[]string{plain, "-stages", "1s:2", "-u", "3"}, "-u cannot be set"},
+		{[]string{plain, "-stages", "1s:20/s"}, "single-URL mode only"},
+		{[]string{plain, "-stages", "1s:2,oops"}, "-stages: stage 2"},
+		{[]string{staged, "-d", "5s"}, "file's load.stages set the run length"},
+		{[]string{staged, "-u", "3"}, "file's load.stages move the number of users"},
+		{[]string{staged, "-ramp", "1s"}, "already has load.stages"},
+		{[]string{iterOnly, "-ramp", "1s"}, "-ramp needs a run length"},
+		{[]string{plain, "-ramp", "1m"}, "longer than the run"},
+	} {
+		args := append([]string{"run", "-base", srv.URL}, c.args...)
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), c.want) {
+			t.Errorf("run(%q) = %d, stderr %q; want 2 and %q", strings.Join(c.args[1:], " "), code, errOut.String(), c.want)
+		}
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("%d requests sent; want none", n)
+	}
+}
+
+type stagedFlowReport struct {
+	Users      int    `json:"users"`
+	StagesSpec string `json:"stages_configured"`
+	Iterations struct {
+		Completed int
+	} `json:"iterations"`
+	Stages []struct {
+		Stage      int      `json:"stage"`
+		Target     float64  `json:"target"`
+		Iterations *int     `json:"iterations"`
+		IPS        *float64 `json:"iterations_per_sec"`
+	} `json:"stages"`
+	Series []struct {
+		Stage  int     `json:"stage"`
+		Target float64 `json:"target"`
+		Active int     `json:"active"`
+	} `json:"series"`
+}
+
+// TestRunFlowStagesJSON runs the shop with stages from the file and from
+// -stages, and checks the Stages and series keys.
+func TestRunFlowStagesJSON(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	for _, args := range [][]string{
+		{writeStagedShop(t, `[{"duration": "0s", "users": 2}, {"duration": "1s", "users": 2, "name": "hold"}, {"duration": "1s", "users": 1}]`)},
+		{writeShopScenario(t), "-stages", "0s:2,1s:2,1s:1"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run(append([]string{"run", "-base", srv.URL, "-seed", "1", "-o", "json"}, args...), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+		}
+		var rep stagedFlowReport
+		if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+			t.Fatalf("bad JSON: %v\n%s", err, stdout.String())
+		}
+		if rep.Users != 2 || rep.StagesSpec != "0s:2,1s:2,1s:1" || rep.Iterations.Completed == 0 {
+			t.Errorf("users %d, stages %q, completed %d", rep.Users, rep.StagesSpec, rep.Iterations.Completed)
+		}
+		if len(rep.Stages) != 3 || rep.Stages[1].Target != 2 || rep.Stages[1].Iterations == nil || *rep.Stages[1].Iterations == 0 || rep.Stages[1].IPS == nil {
+			t.Errorf("stages %+v", rep.Stages)
+		}
+		if len(rep.Series) < 2 || rep.Series[0].Stage != 2 || rep.Series[0].Target != 2 {
+			t.Errorf("series %+v", rep.Series)
+		}
+	}
+}
+
+// TestRunFlowRamp checks that -ramp is short for its -stages form and
+// takes the file's users and duration.
+func TestRunFlowRamp(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run", "-base", srv.URL, "-ramp", "500ms", "-d", "1500ms", "-u", "3", "-o", "json", writeShopScenario(t)}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+	}
+	var rep stagedFlowReport
+	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.StagesSpec != "500ms:3,1s:3" || rep.Users != 3 {
+		t.Errorf("stages %q users %d; want 500ms:3,1s:3 and 3", rep.StagesSpec, rep.Users)
+	}
+}
+
+func TestFlowProgressLine(t *testing.T) {
+	p := flow.Progress{Iterations: 1234, CheckFails: 2, Active: 80, Stage: 2, Target: 100}
+	p.LastSecond.Iterations, p.LastSecond.Requests = 40, 160
+	if got, want := flowProgressLine(p, nil), "1,234 iterations, 40/s and 160 req/s last second, 2 failed checks"; got != want {
+		t.Errorf("plain line = %q, want %q", got, want)
+	}
+	plan, _ := stages.Parse("1m:100,5m:100,1m:0")
+	if got, want := flowProgressLine(p, &plan), "stage 2/3  target 100  active 80  40 it/s  160 req/s  2 failed checks"; got != want {
+		t.Errorf("staged line = %q, want %q", got, want)
 	}
 }

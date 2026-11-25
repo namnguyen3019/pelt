@@ -67,7 +67,8 @@ By default a run holds one level from start to end. Stages change it over
 the run: ramp up, hold, ramp down, or step from one level to another. Use
 them to find the load where a service starts to struggle, to warm a cache
 before the part you measure, or to see whether it recovers once the load
-drops.
+drops. Flow mode takes stages too, moving the number of users; see
+[flow load stages](flows.md#load-stages).
 
 ```sh
 pelt -stages 30s:200,2m:200,30s:0 https://api.example.com/        # 0 → 200 in flight, hold, → 0

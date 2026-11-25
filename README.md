@@ -77,12 +77,13 @@ For multi-step journeys, describe them in a JSON file and run it:
 
 ```sh
 pelt run examples/shop.json -u 50 -d 1m
+pelt run examples/shop.json -stages 1m:100,5m:100,1m:0   # ramp users up, hold, ramp down
 ```
 
 Each virtual user logs in once, keeps its own cookies, and loops through
 weighted flows, carrying values such as a token or an order id from one
-request to the next. The file format, captures and report:
-[docs/flows.md](docs/flows.md).
+request to the next. The file format, captures, [load stages](docs/flows.md#load-stages)
+and report: [docs/flows.md](docs/flows.md).
 
 ## Pelt vs Locust
 

@@ -13,6 +13,7 @@ pelt run examples/shop.json                 # load settings from the file
 pelt run examples/shop.json -u 200 -d 5m    # flags override the file's load block
 pelt run examples/shop.json -i 1000 -o json # stop after 1,000 iterations, JSON out
 pelt run examples/shop.json -dry-run        # one user, one pass, print every request
+pelt run examples/shop.json -stages 1m:100,5m:100,1m:0  # ramp users up, hold, ramp down
 pelt run examples/shop.json -base https://staging.example.com
 ```
 
@@ -29,6 +30,7 @@ write data (carts, orders, sign-ups), so run them against a test system.
 - [Think time](#think-time)
 - [Data file](#data-file)
 - [How the users run](#how-the-users-run)
+- [Load stages](#load-stages)
 - [Flags](#flags)
 - [Reading the report](#reading-the-report)
 - [Per-second results](#per-second-results)
@@ -120,7 +122,7 @@ before the run starts instead of being ignored.
 |-----|---------|
 | `name` | Shown in the report. |
 | `base_url` | Prefix for step URLs that start with `/`. `-base` replaces it. |
-| `load` | `users`, `duration` (like `30s` or `2m`), `iterations` (total, across all users) and `timeout` (per request). Flags override each one. |
+| `load` | `users`, `duration` (like `30s` or `2m`), `iterations` (total, across all users) and `timeout` (per request). Flags override each one. Or `stages` in place of `users` and `duration`; see [Load stages](#load-stages). |
 | `defaults` | `headers` sent on every step, `think` time after every step, and `cookies` (`false` turns the per-user cookie jar off). |
 | `vars` | Fixed values for placeholders. Strings, numbers or booleans. |
 | `data` | A CSV file whose columns become variables, one row per user. See [Data file](#data-file). |
@@ -336,6 +338,75 @@ users. The path is relative to the scenario file.
   failed. Ctrl-C does the same but also aborts requests in flight; the
   partial report still prints and the exit code is 130.
 
+## Load stages
+
+Stages change the number of users over the run: ramp up, hold, ramp down,
+or step from one level to another. Put them in the file's load block in
+place of `users` and `duration`:
+
+```json
+"load": {
+  "stages": [
+    { "duration": "1m", "users": 100, "name": "ramp up" },
+    { "duration": "5m", "users": 100, "name": "hold" },
+    { "duration": "1m", "users": 0 }
+  ],
+  "timeout": "10s"
+}
+```
+
+or on the command line, which replaces the file's stages, users and duration:
+
+```sh
+pelt run shop.json -stages 1m:100,5m:100,1m:0   # the same three stages
+pelt run shop.json -stages 0s:50,2m:50,0s:150,2m:150  # step from 50 to 150 users
+pelt run shop.json -ramp 30s -u 200 -d 5m       # 0 to 200 users over 30s, then hold
+```
+
+- Each stage moves the number of users in a straight line from the previous
+  stage's target to its own over its duration. The run starts at 0 users, a
+  stage of `0s` jumps, and the stages add up to the run length. `name` is
+  optional and shows in the report.
+- `-ramp 30s` is short for `-stages 30s:U,REST:U`, where `U` is `-u` (or the
+  file's `users`) and `REST` is what is left of `-d` (or the file's
+  `duration`).
+- **How users come and go.** The run has as many users as the highest
+  stage. A user starts, and runs setup, the first time the target reaches
+  it, so a login happens once per user however often the level moves. When
+  the target drops below a user's number, that user finishes the iteration
+  it is in (requests and think time included) and then waits; it does not
+  log out or lose its cookies, and picks up where it left off if the target
+  rises again. A user waiting for its turn sends nothing. Users that are
+  thinking when the target drops stop thinking early.
+- `-i` still stops the run early. Thresholds cover the whole run.
+  `-dry-run` ignores stages.
+- Stages in flow mode move users only. Rate stages such as `500/s` are for
+  [single-URL mode](usage.md#load-stages) for now.
+- These exit 2 before any load is sent: `-stages` with `-d`, `-u` or
+  `-ramp`; the file's stages with `-d`, `-u` or `-ramp`; `-ramp` with no run
+  length or longer than the run; a file stage without `duration` or `users`,
+  and a file with `stages` and `users` or `duration` too.
+
+The report adds a Stages block, one row per stage, before the Timeline. A
+second on a stage boundary counts in the next stage. The Timeline's
+`target` column is the average target over each second:
+
+```text
+Load:         user stages 1m:100,5m:100,1m:0 over 7m, seed 41
+
+Stages:
+  stage     name       time     target  requests  req/s  iter/s  p95 ms  errors
+  1      ramp up     0s-60s    0 → 100    14,822    247    61.8   8.112       0
+  2         hold   60s-360s  100 → 100   149,310    498   124.4   9.604       0
+  3               360s-420s    100 → 0    14,701    245    61.2   7.996       0
+```
+
+JSON adds `"stages_configured": "1m:100,5m:100,1m:0"` and a `"stages"` array
+with the same keys as [single-URL mode](usage.md#load-stages) plus
+`iterations`, `iterations_per_sec` and `failed_checks`. The series rows
+carry `stage` and `target`. While the run is going the live line reads
+`stage 2/3  target 100  active 100  124 it/s  498 req/s  0 failed checks`.
+
 ## Flags
 
 ```text
@@ -349,6 +420,8 @@ Flags may go before or after the file name.
 | `-u` | file, else 1 | Virtual users. |
 | `-d` | file | Run for this long, e.g. `2m`. |
 | `-i` | file | Stop after this many iterations in total. |
+| `-stages` | file | Move the number of users over the run, e.g. `1m:100,5m:100,1m:0`. Replaces the file's stages, users and duration. See [Load stages](#load-stages). |
+| `-ramp` | none | Ramp users up from 0 over this long, then hold until the end of the run. Short for `-stages RAMP:U,REST:U`. |
 | `-t` | file, else 10s | Per-request timeout, including reading the body. |
 | `-base` | file | Base URL, replacing `base_url`. |
 | `-seed` | random | Seed for flow picks, think time, `$rand` and `$uuid`. |
@@ -362,7 +435,7 @@ Flags may go before or after the file name.
 
 Exit codes: `0` every threshold passed, `3` a threshold was missed or no
 iteration completed (the report ends with `Result: FAIL (...)`, and JSON has
-`"passed": false`), `130` interrupted, `2` bad file, flags or threshold
+`"passed": false`), `130` interrupted, `2` bad file, flags, stages or threshold
 (with the field, or the line and column), `1` other errors or a failed
 `-dry-run`. Without thresholds, `0` does not mean every check passed; add
 `checks<=0` (or read `failed_checks`) to make failed checks fail the run.
@@ -561,12 +634,13 @@ paste its output anywhere public.
 
 Planned for later versions, roughly in this order:
 
-- Ramp-up (`-ramp`), `sequential` and `random` data modes, and checks on the
-  body (`body_contains`, JSON field equals, max latency).
+- `sequential` and `random` data modes, and checks on the body
+  (`body_contains`, JSON field equals, max latency).
 - A target-rate (open) model, `-rate` iterations per second, counting
-  iterations dropped when no user is free; stopping a run early when a
-  threshold is clearly missed; per-step histograms in JSON.
-- YAML scenario files, load stages, loops and conditional steps.
+  iterations dropped when no user is free, and rate stages in flow mode;
+  stopping a run early when a threshold is clearly missed; per-step
+  histograms in JSON.
+- YAML scenario files, loops and conditional steps.
 
 Single-URL mode (`pelt [flags] <url>`) is unchanged and remains the fastest
 way to hammer one endpoint.

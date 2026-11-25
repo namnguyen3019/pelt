@@ -134,7 +134,7 @@ func (r *Report) WriteText(w io.Writer) error {
 		writeHistogram(&b, r.hist)
 	}
 
-	writeStages(&b, cfg.Stages, r.stages)
+	writeStages(&b, cfg.Stages, r.stages, false)
 	writeTimeline(&b, r.ser, r.tl)
 
 	if len(res.StatusCodes) > 0 {
@@ -322,7 +322,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		StatusCodes:    map[string]int{},
 		ErrorBreakdown: res.Errors,
 		Thresholds:     toJSONThresholds(r.verdict),
-		Stages:         toJSONStages(r.stages),
+		Stages:         toJSONStages(r.stages, false),
 		Series:         toJSONSeries(r.ser),
 	}
 	if cfg.Stages != nil {
