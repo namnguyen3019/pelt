@@ -185,6 +185,31 @@ pelt -n 5000 -c 100 -m POST -H 'Content-Type: application/json' \
 Exit codes: `0` finished, `130` interrupted with Ctrl-C (report still printed),
 `2` bad flags or config, `1` other errors.
 
+## Use Pelt from AI agents
+
+This repo ships an [Agent Skill](https://agentskills.io) at
+[`.agents/skills/pelt/SKILL.md`](.agents/skills/pelt/SKILL.md). It tells a
+coding agent when to reach for Pelt, how to install it, the flags, common
+recipes, how to read the JSON output, and safety rules (only test servers you
+own, start small, ramp up).
+
+Agents load skills from the repository they are working in, so copy the
+folder into your own project:
+
+```sh
+# Devin (and other tools that read .agents/skills)
+mkdir -p .agents/skills
+cp -r path/to/pelt/.agents/skills/pelt .agents/skills/
+
+# Claude Code
+mkdir -p .claude/skills
+cp -r path/to/pelt/.agents/skills/pelt .claude/skills/
+```
+
+Devin also reads `.claude/skills`, so if you use both, the `.claude/skills`
+copy alone is enough. For Claude Code across all your projects, put it in
+`~/.claude/skills/pelt` instead.
+
 ## Pelt vs Locust
 
 [Locust](https://docs.locust.io) is a popular open source load testing tool where
