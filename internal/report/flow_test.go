@@ -3,11 +3,13 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/namnguyen3019/pelt/internal/flow"
+	"github.com/namnguyen3019/pelt/internal/threshold"
 )
 
 func sampleFlowResult(t *testing.T) *flow.Result {
@@ -128,5 +130,121 @@ func TestFlowNoIterationCompletedFails(t *testing.T) {
 	json.Unmarshal(buf.Bytes(), &got)
 	if got.Passed || got.FailReason != "no iteration completed" {
 		t.Errorf("JSON passed=%v reason=%q", got.Passed, got.FailReason)
+	}
+}
+
+// targets resolves threshold expressions against the sample scenario.
+func targets(t *testing.T, sc *flow.Scenario, exprs ...string) []flow.Target {
+	t.Helper()
+	var out []flow.Target
+	for _, e := range exprs {
+		th, err := threshold.Parse(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tg, err := sc.ResolveThreshold(th)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, tg)
+	}
+	return out
+}
+
+func TestFlowCheckThresholds(t *testing.T) {
+	res := sampleFlowResult(t)
+	rep := NewFlow(res)
+	v := rep.Check(targets(t, res.Scenario,
+		// whole run: responses are 1,1,1,2,2,3,4,5 ms
+		"p95<5ms",        // 5.000 ms: FAIL
+		"max<=5ms",       // PASS
+		"errors<10%",     // 1 of 9: FAIL
+		"checks<=1",      // 1 of 9: PASS
+		"aborted<50%",    // 1 of 5 started: PASS
+		"ips>=2.5",       // 5 started in 2s: PASS
+		"setup_failed<1", // PASS
+		// flows
+		"browse: p99<3ms",         // flow time 3.000 ms: FAIL
+		"browse: wall_p50<=200ms", // PASS
+		"checkout: aborted<50%",   // 1 of 2: FAIL
+		"checkout: p95<1s",        // no completed iteration: FAIL, no samples
+		// steps
+		"checkout/pay: status:4xx<=0", // 1 of 2: FAIL
+		"checkout/pay: errors<1%",     // 1 of 2: FAIL
+		"setup/login: p50<=2ms",       // PASS
+		"browse/list products: rps>1", // 1.5/s: PASS
+	))
+	if v.Passed() {
+		t.Fatal("verdict passed, want a failure")
+	}
+	if got := v.Summary(); got != "7 of 15 thresholds missed" {
+		t.Errorf("summary %q", got)
+	}
+
+	var buf bytes.Buffer
+	rep.WriteText(&buf)
+	out := buf.String()
+	for _, re := range []string{
+		`FAIL  p95 < 5ms\s+5\.000 ms`,
+		`FAIL  errors < 10%\s+11\.11%  \(1 of 9\)`,
+		`FAIL  browse: p99 < 3ms\s+3\.000 ms`,
+		`FAIL  checkout: aborted < 50%\s+50\.00%  \(1 of 2\)`,
+		`FAIL  checkout: p95 < 1s\s+no samples`,
+		`FAIL  checkout/pay: status:4xx <= 0\s+1 of 2`,
+		`PASS  browse: wall_p50 <= 200ms\s+200\.000 ms`,
+		`PASS  ips >= 2\.5\s+2\.5/s`,
+		`PASS  setup/login: p50 <= 2ms\s+2\.000 ms`,
+		`PASS  browse/list products: rps > 1\s+1\.5/s`,
+		`Result: FAIL \(7 of 15 thresholds missed\)`,
+	} {
+		if !regexp.MustCompile(re).MatchString(out) {
+			t.Errorf("text report missing %s\n%s", re, out)
+		}
+	}
+	if strings.Index(out, "FAIL  p95") > strings.Index(out, "PASS  max") {
+		t.Error("failures should be listed first")
+	}
+
+	buf.Reset()
+	rep.WriteJSON(&buf)
+	var got struct {
+		Passed     bool            `json:"passed"`
+		Thresholds []jsonThreshold `json:"thresholds"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Passed || len(got.Thresholds) != 15 {
+		t.Fatalf("passed=%v, %d thresholds", got.Passed, len(got.Thresholds))
+	}
+	byExpr := map[string]jsonThreshold{}
+	for _, jt := range got.Thresholds {
+		byExpr[jt.Expr] = jt
+	}
+	if jt := byExpr["checkout/pay: errors<1%"]; jt.Scope != "step" || jt.Flow != "checkout" || jt.Step != "pay" ||
+		*jt.Actual != 50 || *jt.Count != 1 || *jt.Of != 2 || jt.Pass {
+		t.Errorf("step threshold JSON = %+v", jt)
+	}
+	if jt := byExpr["browse: wall_p50<=200ms"]; jt.Scope != "flow" || jt.Flow != "browse" || jt.Step != "" || *jt.Actual != 200 || !jt.Pass {
+		t.Errorf("flow threshold JSON = %+v", jt)
+	}
+	if jt := byExpr["checkout: p95<1s"]; jt.Actual != nil || !jt.NoSamples || jt.Pass {
+		t.Errorf("no-samples threshold JSON = %+v", jt)
+	}
+	if jt := byExpr["p95<5ms"]; jt.Scope != "run" || jt.Flow != "" || *jt.Actual != 5 {
+		t.Errorf("run threshold JSON = %+v", jt)
+	}
+}
+
+func TestFlowCheckPass(t *testing.T) {
+	res := sampleFlowResult(t)
+	rep := NewFlow(res)
+	if v := rep.Check(targets(t, res.Scenario, "mean<3ms", "browse: p95<10ms")); !v.Passed() {
+		t.Fatalf("verdict %+v, want a pass", v)
+	}
+	var buf bytes.Buffer
+	rep.WriteText(&buf)
+	if !strings.Contains(buf.String(), "Result: PASS (all 2 thresholds met)") {
+		t.Errorf("missing PASS line:\n%s", buf.String())
 	}
 }

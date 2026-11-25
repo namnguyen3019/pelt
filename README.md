@@ -59,7 +59,8 @@ exits 3 if any is missed:
 pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
 ```
 
-Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds).
+Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
+files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
 
 For multi-step journeys, describe them in a JSON file and run it:
 

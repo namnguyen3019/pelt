@@ -138,3 +138,99 @@ func TestRunFlowBadArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestRunFlowThresholds checks exit codes for thresholds from the command
+// line and the file, against the test shop.
+func TestRunFlowThresholds(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	file := writeShopScenario(t)
+	base := []string{"run", file, "-u", "2", "-i", "20", "-d", "0", "-base", srv.URL, "-seed", "3"}
+
+	// Targets the shop meets: exit 0.
+	var stdout, stderr bytes.Buffer
+	args := append(base, "-threshold", "checks<=0", "-threshold", "checkout: p95<10s",
+		"-threshold", "checkout/add to cart: errors<1%", "-threshold", "browse: aborted<=0")
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("passing thresholds exited %d\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Result: PASS (all 4 thresholds met)") {
+		t.Errorf("missing PASS line:\n%s", stdout.String())
+	}
+
+	// A target it cannot meet: exit 3, JSON on stdout, one line on stderr.
+	stdout.Reset()
+	stderr.Reset()
+	args = append(base, "-o", "json", "-threshold", "checkout/checkout: requests>=1000000")
+	if code := run(args, &stdout, &stderr); code != 3 {
+		t.Fatalf("failing threshold exited %d\n%s", code, stderr.String())
+	}
+	var rep struct {
+		Passed     bool `json:"passed"`
+		Thresholds []struct {
+			Scope, Flow, Step string
+			Pass              bool
+		} `json:"thresholds"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if rep.Passed || len(rep.Thresholds) != 1 || rep.Thresholds[0].Scope != "step" ||
+		rep.Thresholds[0].Flow != "checkout" || rep.Thresholds[0].Step != "checkout" {
+		t.Errorf("JSON = %+v", rep)
+	}
+	if got := stderr.String(); got != "pelt: FAIL: 1 of 1 threshold missed\n" {
+		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestRunFlowFileThresholds(t *testing.T) {
+	srv := httptest.NewServer(testshop.New())
+	defer srv.Close()
+	path := filepath.Join(t.TempDir(), "s.json")
+	os.WriteFile(path, []byte(`{
+	  "load": {"users": 1, "iterations": 5},
+	  "thresholds": ["requests>=1000"],
+	  "flows": [{"name": "browse", "thresholds": ["p95<10s"],
+	    "steps": [{"name": "list", "url": "/products", "check": {"status": 200}, "thresholds": ["checks<=0"]}]}]
+	}`), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run", path, "-base", srv.URL}, &stdout, &stderr); code != 3 {
+		t.Fatalf("file thresholds exited %d, want 3\n%s%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"FAIL  requests >= 1000", "PASS  browse: p95 < 10s", "PASS  browse/list: checks <= 0",
+		"Result: FAIL (1 of 3 thresholds missed)"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, stdout.String())
+		}
+	}
+
+	// -no-thresholds drops the file's list; -threshold still counts.
+	stdout.Reset()
+	if code := run([]string{"run", path, "-base", srv.URL, "-no-thresholds", "-threshold", "browse/list: requests>=5"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("-no-thresholds exited %d\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "requests >= 1000") || !strings.Contains(out, "Result: PASS (1 threshold met)") {
+		t.Errorf("-no-thresholds output:\n%s", out)
+	}
+}
+
+func TestRunFlowBadThresholds(t *testing.T) {
+	good := writeShopScenario(t)
+	for _, c := range []struct {
+		expr, want string
+	}{
+		{"p95<1%", "not a percentage"},
+		{"cart: p95<1s", `no flow or step named "cart"`},
+		{"checkout/pay: p95<1s", `no flow or step named "checkout/pay"`},
+		{"browse: errors<1%", "errors is measured for the whole run or a step, not for a flow"},
+		{"wall_p95<1s", "wall_p95 is measured for a flow, not for the whole run"},
+	} {
+		var out, errOut bytes.Buffer
+		code := run([]string{"run", good, "-base", "http://127.0.0.1:1", "-threshold", c.expr}, &out, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), c.want) {
+			t.Errorf("-threshold %q = %d, stderr %q; want 2 and %q", c.expr, code, errOut.String(), c.want)
+		}
+	}
+}

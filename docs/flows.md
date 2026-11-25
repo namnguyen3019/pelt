@@ -25,6 +25,7 @@ write data (carts, orders, sign-ups), so run them against a test system.
 - [Variables and placeholders](#variables-and-placeholders)
 - [Captures](#captures)
 - [Checks and failures](#checks-and-failures)
+- [Thresholds](#thresholds)
 - [Think time](#think-time)
 - [Data file](#data-file)
 - [How the users run](#how-the-users-run)
@@ -123,7 +124,8 @@ before the run starts instead of being ignored.
 | `vars` | Fixed values for placeholders. Strings, numbers or booleans. |
 | `data` | A CSV file whose columns become variables, one row per user. See [Data file](#data-file). |
 | `setup` | Steps each user runs once, before any flow. Typically a login. |
-| `flows` | Named, weighted lists of steps. Each iteration picks one flow by weight and runs its steps in order. |
+| `flows` | Named, weighted lists of steps. Each iteration picks one flow by weight and runs its steps in order. A flow may also have `thresholds`. |
+| `thresholds` | Pass/fail targets for the whole run; see [Thresholds](#thresholds). |
 
 `weight` defaults to 1. With weights 7 and 3, about 70% of iterations browse
 and 30% check out.
@@ -145,6 +147,7 @@ A step is one request.
 | `capture` | Values to pull out of the response; see [Captures](#captures). |
 | `think` | Pause after this step, overriding `defaults.think`. |
 | `on_fail` | `abort` (default) or `continue`; see [Checks and failures](#checks-and-failures). |
+| `thresholds` | Pass/fail targets for this step; see [Thresholds](#thresholds). |
 
 Use at most one of `body`, `body_file` and `json`.
 
@@ -212,6 +215,80 @@ setup again, up to 4 attempts. A user that never gets through sits out the
 rest of the run, and the report says how many did. If every user gives up,
 the run ends early.
 
+## Thresholds
+
+Thresholds turn a run into a pass or a fail, so a flow can gate a deploy in
+CI. A `thresholds` list can sit at the top of the file, on a flow, or on a
+step (setup steps included). Where it sits says what it measures, so the
+entries stay short:
+
+```json
+{
+  "name": "shop",
+  "thresholds": ["p95<500ms", "errors<1%", "checks<0.5%"],
+  "flows": [
+    {
+      "name": "checkout",
+      "thresholds": ["p95<800ms", "aborted<2%"],
+      "steps": [
+        { "name": "checkout", "method": "POST", "url": "/checkout",
+          "check": { "status": 201 },
+          "thresholds": ["p99<300ms", "status:5xx<0.1%"] }
+      ]
+    }
+  ]
+}
+```
+
+If any threshold is missed the run exits `3`. The syntax is the one
+single-URL mode uses (`metric op value`, with `<`, `<=`, `>` or `>=`; see
+[usage](usage.md#thresholds)). Flow mode adds metrics for checks and
+iterations, and each metric is measured at the levels where it makes sense:
+
+| Metric | Whole run | Flow | Step |
+|--------|-----------|------|------|
+| `pN`, `mean`, `max` | Every response | Flow time: request time of completed iterations, think time left out | The step's responses |
+| `wall_pN` | | Wall time of completed iterations, think time included | |
+| `errors` | Transport errors, share of requests or a count | | Same, for the step |
+| `status:5xx`, `status:503`, ... | Responses with that status, share of requests or a count | | Same, for the step |
+| `checks` | Failed checks and captures, share of requests or a count | | Same, for the step |
+| `rps` | Requests per second | | Same, for the step |
+| `requests` | Completed requests | | Same, for the step |
+| `aborted` | Iterations stopped by a failure, share of started or a count | Same, for the flow | |
+| `ips` | Iterations started per second | Same, for the flow | |
+| `setup_failed` | Users that gave up after every setup attempt (a count) | | |
+
+A metric in an empty cell is an error before the run starts: `errors` on a
+flow, for example, tells you to put it on a step or the whole run. A metric
+with nothing to measure fails with `no samples`, so a step that never ran,
+or a flow that never completed, fails its latency thresholds. Lengthen the
+run or drop the threshold.
+
+On the command line, `-threshold` adds targets to the file's. A scope before
+a colon names a flow (`checkout: p95<800ms`) or a step
+(`checkout/add to cart: errors<1%`, or `setup/login: p99<1s` for a setup
+step); no scope means the whole run. A scope that names no flow or step
+exits `2` before any load is sent. `-no-thresholds` skips the file's list,
+for exploring without editing the file; `-threshold` flags still apply.
+
+```sh
+pelt run shop.json -threshold 'checkout/checkout: p99<250ms'   # tighten one step in CI
+pelt run shop.json -no-thresholds -u 200                     # explore past the targets
+```
+
+The text report ends with one line per threshold, failures first:
+
+```text
+Thresholds:
+  FAIL  checkout/checkout: status:5xx < 0.1%  0.40%  (2 of 500)
+  PASS  p95 < 500ms                           212.400 ms
+  PASS  checkout: aborted < 2%                0.80%  (1 of 125)
+
+Result: FAIL (1 of 3 thresholds missed)
+```
+
+Thresholds are checked once the run ends; `-dry-run` ignores them.
+
 ## Think time
 
 `think` is a fixed pause (`"1s"`) or a uniform random range (`"500ms-2s"`)
@@ -278,14 +355,15 @@ Flags may go before or after the file name.
 | `-quiet` | false | Hide the live progress line (iterations, iterations/sec, failed checks). |
 | `-http2` | false | Allow HTTP/2 over TLS. |
 | `-dry-run` | false | Run setup and each flow once as one user and print everything. |
+| `-threshold` | none | A pass/fail target such as `p95<500ms` or `checkout/pay: errors<1%`. Repeatable; added to the file's. See [Thresholds](#thresholds). |
+| `-no-thresholds` | false | Skip the file's thresholds. `-threshold` flags still apply. |
 
-Exit codes: `0` finished, `3` no iteration completed (the report ends with
-`Result: FAIL (no iteration completed)`, and JSON has `"passed": false`),
-`130` interrupted, `2` bad file or flags (with the field, or the line and
-column), `1` other errors or a failed `-dry-run`. `0` does not mean every
-check passed; read `failed_checks` in the report. Thresholds that fail a flow
-run on latency, errors or checks are not in flow mode yet; single-URL mode
-has them ([thresholds](usage.md#thresholds)).
+Exit codes: `0` every threshold passed, `3` a threshold was missed or no
+iteration completed (the report ends with `Result: FAIL (...)`, and JSON has
+`"passed": false`), `130` interrupted, `2` bad file, flags or threshold
+(with the field, or the line and column), `1` other errors or a failed
+`-dry-run`. Without thresholds, `0` does not mean every check passed; add
+`checks<=0` (or read `failed_checks`) to make failed checks fail the run.
 
 ## Reading the report
 
@@ -391,6 +469,26 @@ same keys as single-URL mode (`total`, `responses`, `errors`,
 `flow_time_ms`, `wall_time_ms` and `latency_ms` are left out when there are
 no samples.
 
+The report also has `"passed"` (always present) and, when it failed only
+because no iteration completed, `"fail_reason"`. With thresholds it has a
+`"thresholds"` array, one object per threshold, failures first. `scope` is
+`run`, `flow` or `step`, with `flow` and `step` naming it:
+
+```json
+"passed": false,
+"thresholds": [
+  {"scope": "step", "flow": "checkout", "step": "checkout", "expr": "status:5xx<0.1%",
+   "metric": "status:5xx", "op": "<", "target": 0.1, "actual": 0.4, "unit": "%",
+   "count": 2, "of": 500, "pass": false},
+  {"scope": "run", "expr": "p95<500ms", "metric": "p95", "op": "<",
+   "target": 500, "actual": 212.4, "unit": "ms", "pass": true}
+]
+```
+
+`actual` is `null` when there was nothing to measure. A failing run with
+`-o json` also prints one line to stderr, such as
+`pelt: FAIL: 1 of 3 thresholds missed`, so it shows in CI logs.
+
 ## Debugging a file with -dry-run
 
 `-dry-run` runs setup and then each flow once, in file order, as user 1 with
@@ -437,9 +535,8 @@ Planned for later versions, roughly in this order:
 - Ramp-up (`-ramp`), `sequential` and `random` data modes, and checks on the
   body (`body_contains`, JSON field equals, max latency).
 - A target-rate (open) model, `-rate` iterations per second, counting
-  iterations dropped when no user is free; thresholds in the file, per flow
-  and per step, that fail the run for CI (single-URL mode already has
-  `-threshold`); per-step histograms in JSON.
+  iterations dropped when no user is free; stopping a run early when a
+  threshold is clearly missed; per-step histograms in JSON.
 - YAML scenario files, load stages, loops and conditional steps.
 
 Single-URL mode (`pelt [flags] <url>`) is unchanged and remains the fastest

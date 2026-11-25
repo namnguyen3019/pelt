@@ -38,7 +38,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		quiet    = fs.Bool("quiet", false, "hide the live progress line")
 		http2    = fs.Bool("http2", false, "allow HTTP/2 (default forces HTTP/1.1)")
 		dryRun   = fs.Bool("dry-run", false, "run setup and each flow once as one user, print every request and response, and exit")
+		noFile   = fs.Bool("no-thresholds", false, "ignore the file's thresholds (-threshold flags still apply)")
+		cliTs    thresholdFlag
 	)
+	fs.Var(&cliTs, "threshold", "pass/fail target, e.g. 'p95<500ms' or 'checkout/pay: errors<1%' (repeatable; added to the file's)")
 
 	// Accept flags on either side of the file name: pelt run shop.json -u 50.
 	var file string
@@ -71,6 +74,21 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
+	}
+
+	// The file's thresholds, then the command line's. A scope that names
+	// no flow or step fails here, before any load is sent.
+	var targets []flow.Target
+	if !*noFile {
+		targets = append(targets, sc.Thresholds...)
+	}
+	for _, t := range cliTs {
+		tg, err := sc.ResolveThreshold(t)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: threshold %q: %v\n", t.Expr, err)
+			return exitUsage
+		}
+		targets = append(targets, tg)
 	}
 
 	set := map[string]bool{}
@@ -130,6 +148,7 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 	stopProgress()
 
 	rep := report.NewFlow(res)
+	rep.Check(targets)
 	if *output == "json" {
 		err = rep.WriteJSON(stdout)
 	} else {

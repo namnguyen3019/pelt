@@ -69,7 +69,24 @@ type Threshold struct {
 	// inclusive range of status codes counted (500-599 for status:5xx).
 	StatusLow, StatusHigh int
 
+	// Flow and Step say what the threshold measures once flow mode has
+	// tied its scope to the scenario: both empty for the whole run, Flow
+	// alone for a flow, both for a step ("setup" is the flow of a setup
+	// step). Parse leaves them empty.
+	Flow, Step string
+
 	valueText string
+}
+
+// Level is "run", "flow" or "step": what the threshold measures.
+func (t Threshold) Level() string {
+	switch {
+	case t.Step != "":
+		return "step"
+	case t.Flow != "":
+		return "flow"
+	}
+	return "run"
 }
 
 // FlowOnly reports whether the metric only exists in flow mode.
