@@ -43,9 +43,14 @@ pelt [flags] <url>
 | `-o` | text | Output format: `text` or `json`. |
 | `-series` | | Also write one row per second of the run to this CSV file. See [Per-second results](#per-second-results). |
 | `-http2` | false | Allow HTTP/2 over TLS. By default the tool forces HTTP/1.1. |
+| `-insecure` | false | Skip verifying the server's TLS certificate, e.g. a self-signed staging cert. See [TLS and proxies](#tls-and-proxies). |
+| `-cacert` | | PEM file of CA certificates to trust, on top of the system's. |
+| `-cert`, `-key` | | PEM client certificate and its key, for servers that require one (mutual TLS). |
+| `-proxy` | | Send requests through this proxy (`http://`, `https://` or `socks5://`). By default `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` apply. |
 | `-untuned` | false | Use Go's stock connection pool limits, to see why tuning matters. |
 | `-quiet` | false | Hide the live progress line (only shown on a terminal): requests so far, req/s in the last whole second, errors so far. With stages it shows the stage, its target now and requests in flight instead. |
 | `-threshold` | | Pass/fail target such as `'p95<300ms'` or `'errors<1%'`. Repeat for more. A missed target exits 3. See [Thresholds](#thresholds). |
+| `-version` | | Print the version (for example `pelt v0.4.3 (go1.24.7, linux/amd64)`) and exit. |
 
 ## Examples
 
@@ -60,6 +65,31 @@ pelt -stages 30s:200,2m:200,30s:0 http://127.0.0.1:8080/
 pelt -n 5000 -c 100 -m POST -H 'Content-Type: application/json' \
   -body '{"hello":"world"}' -o json http://127.0.0.1:8080/api | jq .latency_ms
 ```
+
+## TLS and proxies
+
+Staging servers often have a self-signed or internal certificate, which
+Pelt refuses like any client would (every request shows as a `tls error`).
+Either trust the CA that signed it, or skip the check:
+
+```sh
+pelt -d 30s -cacert internal-ca.pem https://staging.internal/   # verify against your CA
+pelt -d 30s -insecure https://staging.internal/                 # don't verify at all
+```
+
+For a server that requires a client certificate, add `-cert client.pem -key
+client.key`. To send the load through a proxy, use `-proxy
+http://proxy:3128`; without it, the usual `HTTPS_PROXY`, `HTTP_PROXY` and
+`NO_PROXY` variables apply (loopback addresses never go through a proxy).
+Through a proxy, the report's connection counts are connections to the
+proxy.
+
+To hit a server by IP while sending the name it expects, set the Host
+header: `-H 'Host: shop.example.com' https://10.0.0.5/`. For HTTPS this sets
+the HTTP Host only; the certificate is still checked against the address in
+the URL, so pair it with `-insecure`.
+
+All of these work the same in flow mode (`pelt run`).
 
 ## Load stages
 

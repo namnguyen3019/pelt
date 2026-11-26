@@ -89,9 +89,14 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-ramp` | | Ramp concurrency from 0 to `-c` over this long, then hold for the rest of `-d`. |
 | `-series` | | Also write one row per second to this CSV file. |
 | `-http2` | false | Allow HTTP/2 over TLS (default forces HTTP/1.1). |
+| `-insecure` | false | Skip verifying the server's TLS certificate (self-signed staging). Only on the user's say-so. |
+| `-cacert` | | PEM CA file to trust on top of the system's. Prefer it to `-insecure`. |
+| `-cert`, `-key` | | PEM client certificate and key (mutual TLS). |
+| `-proxy` | | Proxy URL (`http://`, `https://`, `socks5://`). Default: `HTTPS_PROXY`/`HTTP_PROXY`. |
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
 | `-quiet` | false | Hide the live progress line. |
 | `-threshold` | | Pass/fail target, e.g. `'p95<300ms'`, `'errors<1%'`. Repeatable. Missed = exit 3. See [Thresholds](#thresholds-passfail). |
+| `-version` | | Print the version and exit (v0.4.3 and later). |
 
 ## Recipes
 
@@ -261,14 +266,22 @@ A minimal scenario:
   Built-ins: `{{$vu}}`, `{{$iteration}}`, `{{$uuid}}`, `{{$rand 1 100}}`,
   `{{$env NAME}}`. Unknown names fail at load.
 - Captures: `json` (dot path like `items[0].id`), `header`, `regex`, `status`.
-- A failed `check.status` or an empty capture aborts the rest of that
-  iteration unless the step has `"on_fail": "continue"`. A step with no
-  `check` accepts any status, so add checks.
+- `check` can hold `status` (`200` or `[200, 201]`), `body_contains`
+  (text or a list; placeholders allowed), `json` (`{"status": "paid",
+  "items[0].qty": 1}`: paths that must equal these values) and
+  `max_latency` (`"500ms"`). A failed check or an empty capture aborts the
+  rest of that iteration unless the step has `"on_fail": "continue"`. A
+  step with no `check` accepts any status and any body, so add checks; a
+  200 with an error body only fails on a body check.
+- `data.mode`: `unique` (default; user n keeps row n, needs a row per
+  user), `sequential` (rows in order per setup and per iteration, shared,
+  wrapping) or `random` (random row per setup and iteration, seeded).
 - Unknown keys are errors (exit 2, with line and column).
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
 total iterations, `-t` timeout, `-stages`, `-ramp`, `-base` base URL,
-`-seed`, `-o json`, `-series out.csv`, `-quiet`, `-http2`, `-dry-run`, plus
+`-seed`, `-o json`, `-series out.csv`, `-quiet`, `-http2`, `-dry-run`, the TLS and
+proxy flags (`-insecure`, `-cacert`, `-cert`, `-key`, `-proxy`), plus
 `-threshold` (repeatable) and `-no-thresholds`. They may go before or after
 the file.
 
@@ -454,8 +467,7 @@ separate host.
 
 - Single-URL mode sends one fixed request; use `pelt run` for journeys,
   cookies and per-request variation.
-- Flow mode has no target-rate mode or rate stages, branches or loops yet, and
-  checks only look at the status code. For journeys that need real code, use
+- Flow mode has no target-rate mode or rate stages, branches or loops yet. For journeys that need real code, use
   a scripted tool such as Locust or k6.
 - Closed loop: a worker waits for each response before sending the next, so
   a stalling server gets fewer requests (coordinated omission) and tail

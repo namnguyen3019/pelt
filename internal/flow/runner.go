@@ -2,11 +2,13 @@ package flow
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +27,8 @@ type Options struct {
 	Timeout    time.Duration // per request, including reading the body
 	Seed       uint64        // seeds each user's random source: flow picks, think, $rand
 	HTTP2      bool
+	TLS        *tls.Config // nil for Go's defaults; see loadtest.Network
+	Proxy      *url.URL    // nil to use HTTPS_PROXY and HTTP_PROXY
 	// Stages move the number of users over the run and set its length, so
 	// Duration must be 0. Users becomes their highest target.
 	Stages *stages.Plan
@@ -79,7 +83,7 @@ func (o *Options) validate(sc *Scenario) error {
 	if o.Timeout < 0 {
 		return errors.New("timeout must be positive")
 	}
-	if sc.Data != nil && len(sc.Data.Rows) < o.Users {
+	if sc.Data != nil && sc.Data.Mode == DataUnique && len(sc.Data.Rows) < o.Users {
 		if o.Stages != nil {
 			return fmt.Errorf("data file has %d rows but the stages reach %d users, who need one each (mode unique)", len(sc.Data.Rows), o.Users)
 		}
@@ -110,6 +114,7 @@ type Runner struct {
 	active      atomic.Int64 // users running: started and not gone
 	connsNew    atomic.Int64
 	connsReused atomic.Int64
+	dataNext    atomic.Int64 // next row in sequential data mode
 
 	// series counts per second; nil in a dry run.
 	series atomic.Pointer[series.Counters]
@@ -139,6 +144,8 @@ func New(sc *Scenario, opts Options) (*Runner, error) {
 		Concurrency: opts.Users,
 		Timeout:     opts.Timeout,
 		HTTP2:       opts.HTTP2,
+		TLS:         opts.TLS,
+		Proxy:       opts.Proxy,
 	})
 	r.trace = &httptrace.ClientTrace{
 		ConnectDone: func(_, _ string, err error) {

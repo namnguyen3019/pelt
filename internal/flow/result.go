@@ -37,7 +37,7 @@ type StepResult struct {
 
 	Requests   int // completed: responses + errors
 	Responses  int // got an HTTP response (any status)
-	CheckFails int // responses whose status check or a capture failed
+	CheckFails int // responses whose check or a capture failed
 	Aborted    int // in flight when Ctrl-C hit; not in Requests
 
 	// AbortedIterations counts iterations (or setup attempts) that stopped

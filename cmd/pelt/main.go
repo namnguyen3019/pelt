@@ -4,8 +4,9 @@
 //	pelt -n 10000 -c 200 http://127.0.0.1:8080/
 //	pelt -d 30s -c 500 -rate 2000 http://127.0.0.1:8080/
 //	pelt -stages 30s:200,2m:200,30s:0 http://127.0.0.1:8080/
-//	pelt -d 30s -threshold 'p95<300ms' -threshold 'errors<1%' http://127.0.0.1:8080/
+//	pelt -d 30s -threshold 'p95<300ms' -threshold 'errors<1%' -threshold 'status:5xx<1%' http://127.0.0.1:8080/
 //	pelt run -u 50 -d 2m shop.json      # flow mode, see docs/flows.md
+//	pelt -version
 //
 // Exit codes: 0 pass, 1 runtime error, 2 bad flags, 3 a threshold was missed
 // or no request got a response, 130 interrupted.
@@ -141,7 +142,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		stagesArg  = fs.String("stages", "", "change the load over the run, e.g. 30s:200,2m:200,30s:0 (concurrency) or 1m:500/s,5m:500/s (rate); sets the run length")
 		ramp       = fs.Duration("ramp", 0, "ramp concurrency from 0 up to -c over this long, then hold for the rest of -d")
 		quiet      = fs.Bool("quiet", false, "hide the live progress line")
+		showVer    = fs.Bool("version", false, "print the version and exit")
 	)
+	network := networkFlags(fs)
 	fs.Var(&headers, "H", "request header 'Name: value' (repeatable)")
 	fs.Var(&thresholds, "threshold", "pass/fail target such as 'p95<300ms', 'errors<1%' or 'rps>500' (repeatable); exit 3 if missed")
 
@@ -150,6 +153,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		return 2
+	}
+	if *showVer {
+		fmt.Fprintln(stdout, versionString())
+		return exitOK
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
@@ -198,6 +205,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		payload = []byte(*body)
 	}
 
+	tlsConf, proxy, err := network.Build()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
+	}
+
 	seriesFile, err := createSeries(*seriesOut)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -217,6 +230,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		RateLimit:   *rate,
 		HTTP2:       *http2,
 		Untuned:     *untuned,
+		TLS:         tlsConf,
+		Proxy:       proxy,
 		Stages:      plan,
 	})
 	if err != nil {

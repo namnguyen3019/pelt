@@ -3,6 +3,7 @@
 package loadtest
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -44,6 +45,14 @@ type Config struct {
 	// host) instead of sizing the pool to Concurrency. Useful only to show
 	// why tuning matters; see docs/design.md.
 	Untuned bool
+
+	// TLS, when set, replaces Go's default client TLS settings: a CA to
+	// trust, a client certificate, or skipping verification. Build it with
+	// Network.Build.
+	TLS *tls.Config
+	// Proxy, when set, sends every request through this proxy instead of
+	// the one HTTPS_PROXY or HTTP_PROXY names.
+	Proxy *url.URL
 
 	// Stages, when set, change the load over the run and set its length,
 	// so Duration must be 0; Requests still stops the run early. Level

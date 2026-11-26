@@ -65,7 +65,14 @@ func TestParseErrors(t *testing.T) {
 		{"bad regex", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "capture": [{"as": "x", "regex": "("}]}]}]}`, "regex"},
 		{"bad base_url", `{"base_url": "ftp://x", "flows": [{"name": "a", "steps": [{"url": "/"}]}]}`, "base_url"},
 		{"unset env", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/{{$env PELT_SURELY_UNSET_VAR}}"}]}]}`, "not set"},
-		{"unsupported data mode", `{"base_url": "http://x", "data": {"file": "u.csv", "mode": "random"}, "flows": [{"name": "a", "steps": [{"url": "/"}]}]}`, "not supported yet"},
+		{"unknown data mode", `{"base_url": "http://x", "data": {"file": "u.csv", "mode": "shuffle"}, "flows": [{"name": "a", "steps": [{"url": "/"}]}]}`, `want "unique", "sequential" or "random"`},
+		{"empty body_contains", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"body_contains": ""}}]}]}`, "matches every body"},
+		{"body_contains not text", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"body_contains": 5}}]}]}`, "string or a list"},
+		{"body_contains unknown var", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"body_contains": "{{nope}}"}}]}]}`, "{{nope}} is not set"},
+		{"check json bad path", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"json": {"a[": 1}}}]}]}`, "bad JSON path"},
+		{"check json unknown var", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"json": {"id": "{{nope}}"}}}]}]}`, "{{nope}} is not set"},
+		{"bad max_latency", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"max_latency": "fast"}}]}]}`, "max_latency"},
+		{"unknown check key", `{"base_url": "http://x", "flows": [{"name": "a", "steps": [{"url": "/", "check": {"body": "x"}}]}]}`, "body"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -111,7 +118,7 @@ func TestParseKnownVariables(t *testing.T) {
 	if ct != "application/json" {
 		t.Errorf("json body should set Content-Type, got %q", ct)
 	}
-	if len(sc.Data.Rows) != 2 || sc.Data.row(2)["username"] != "user2" {
+	if len(sc.Data.Rows) != 2 || sc.Data.row(1)["username"] != "user2" {
 		t.Errorf("data = %+v", sc.Data)
 	}
 }

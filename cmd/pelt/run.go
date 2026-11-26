@@ -43,8 +43,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		noFile   = fs.Bool("no-thresholds", false, "ignore the file's thresholds (-threshold flags still apply)")
 		stageArg = fs.String("stages", "", "move the number of users over the run, e.g. 1m:100,5m:100,1m:0 (replaces the file's load.stages, users and duration)")
 		ramp     = fs.Duration("ramp", 0, "ramp users up from 0 over this long, then hold until the end of the run (short for -stages RAMP:U,REST:U)")
+		showVer  = fs.Bool("version", false, "print the version and exit")
 		cliTs    thresholdFlag
 	)
+	network := networkFlags(fs)
 	fs.Var(&cliTs, "threshold", "pass/fail target, e.g. 'p95<500ms' or 'checkout/pay: errors<1%' (repeatable; added to the file's)")
 
 	// Accept flags on either side of the file name: pelt run shop.json -u 50.
@@ -64,6 +66,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		file, args = fs.Arg(0), fs.Args()[1:]
+	}
+	if *showVer {
+		fmt.Fprintln(stdout, versionString())
+		return exitOK
 	}
 	if file == "" {
 		fs.Usage()
@@ -119,6 +125,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	opts.HTTP2 = *http2
+	if opts.TLS, opts.Proxy, err = network.Build(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
+	}
 	opts.Seed = *seed
 	if !set["seed"] {
 		opts.Seed = randomSeed()
