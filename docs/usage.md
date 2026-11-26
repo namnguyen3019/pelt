@@ -46,6 +46,7 @@ pelt [flags] <url>
 | `-untuned` | false | Use Go's stock connection pool limits, to see why tuning matters. |
 | `-quiet` | false | Hide the live progress line (only shown on a terminal): requests so far, req/s in the last whole second, errors so far. With stages it shows the stage, its target now and requests in flight instead. |
 | `-threshold` | | Pass/fail target such as `'p95<300ms'` or `'errors<1%'`. Repeat for more. A missed target exits 3. See [Thresholds](#thresholds). |
+| `-version` | | Print the version (for example `pelt v0.4.3 (go1.24.7, linux/amd64)`) and exit. |
 
 ## Examples
 

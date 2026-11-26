@@ -92,6 +92,7 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
 | `-quiet` | false | Hide the live progress line. |
 | `-threshold` | | Pass/fail target, e.g. `'p95<300ms'`, `'errors<1%'`. Repeatable. Missed = exit 3. See [Thresholds](#thresholds-passfail). |
+| `-version` | | Print the version and exit (v0.4.3 and later). |
 
 ## Recipes
 

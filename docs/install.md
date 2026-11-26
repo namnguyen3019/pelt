@@ -55,7 +55,8 @@ release added:
 | v0.2.0 | [Flow mode](flows.md): `pelt run` |
 | v0.1.0 | Single-URL mode |
 
-To check what you have, run `pelt -h`: v0.4.0 and later list `-stages`.
+To check what you have, run `pelt -version` (v0.4.3 and later). Older builds
+don't have it; `pelt -h` on v0.4.0 to v0.4.2 lists `-stages`.
 
 ## Prebuilt binary
 
