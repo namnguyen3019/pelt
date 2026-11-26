@@ -73,6 +73,7 @@ type Step struct {
 	Header []HeaderTemplate
 	Body   *Template // nil for no body
 	Status []int     // allowed status codes; empty means no status check
+	Checks Checks    // body, JSON and latency checks
 	Capt   []*Capture
 	Think  Think
 	// ContinueOnFail keeps the iteration going after a failed check or
@@ -153,7 +154,10 @@ type fileStep struct {
 }
 
 type fileCheck struct {
-	Status statusList `json:"status"`
+	Status       statusList                 `json:"status"`
+	BodyContains stringList                 `json:"body_contains"`
+	JSON         map[string]json.RawMessage `json:"json"`
+	MaxLatency   string                     `json:"max_latency"`
 }
 
 type fileCapture struct {
@@ -301,12 +305,13 @@ func compile(f *fileScenario, dir string, raw []byte) (*Scenario, error) {
 		if f.Data.File == "" {
 			return nil, errors.New("data.file is required")
 		}
-		switch f.Data.Mode {
-		case "", "unique":
-		case "sequential", "random":
-			return nil, fmt.Errorf("data.mode %q is not supported yet; only \"unique\" is", f.Data.Mode)
+		mode := f.Data.Mode
+		switch mode {
+		case "":
+			mode = DataUnique
+		case DataUnique, DataSequential, DataRandom:
 		default:
-			return nil, fmt.Errorf("data.mode %q: want \"unique\"", f.Data.Mode)
+			return nil, fmt.Errorf("data.mode %q: want \"unique\", \"sequential\" or \"random\"", f.Data.Mode)
 		}
 		p := f.Data.File
 		if !filepath.IsAbs(p) {
@@ -315,6 +320,7 @@ func compile(f *fileScenario, dir string, raw []byte) (*Scenario, error) {
 		if sc.Data, err = readCSV(p); err != nil {
 			return nil, fmt.Errorf("data.file: %w", err)
 		}
+		sc.Data.Mode = mode
 	}
 
 	defThink := Think{}
@@ -519,13 +525,6 @@ func (c *compiler) step(fs *fileStep, flowName, where string, known map[string]b
 		st.Header = append(st.Header, HeaderTemplate{Name: k, Value: t})
 	}
 
-	// Every variable must be set before this step runs.
-	for _, v := range sortedKeys(used) {
-		if !known[v] {
-			return nil, fmt.Errorf("%s: {{%s}} is not set by vars, the data file, or a capture in setup or an earlier step", where, v)
-		}
-	}
-
 	if fs.Check != nil {
 		for _, code := range fs.Check.Status {
 			if code < 100 || code > 599 {
@@ -533,6 +532,19 @@ func (c *compiler) step(fs *fileStep, flowName, where string, known map[string]b
 			}
 		}
 		st.Status = fs.Check.Status
+		if st.Checks, err = compileChecks(fs.Check, note); err != nil {
+			return nil, fmt.Errorf("%s: %w", where, err)
+		}
+		if st.Checks.needsBody() {
+			st.needsBody = true
+		}
+	}
+
+	// Every variable must be set before this step runs.
+	for _, v := range sortedKeys(used) {
+		if !known[v] {
+			return nil, fmt.Errorf("%s: {{%s}} is not set by vars, the data file, or a capture in setup or an earlier step", where, v)
+		}
 	}
 
 	for i, fc := range fs.Capture {

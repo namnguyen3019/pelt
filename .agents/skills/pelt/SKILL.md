@@ -266,9 +266,16 @@ A minimal scenario:
   Built-ins: `{{$vu}}`, `{{$iteration}}`, `{{$uuid}}`, `{{$rand 1 100}}`,
   `{{$env NAME}}`. Unknown names fail at load.
 - Captures: `json` (dot path like `items[0].id`), `header`, `regex`, `status`.
-- A failed `check.status` or an empty capture aborts the rest of that
-  iteration unless the step has `"on_fail": "continue"`. A step with no
-  `check` accepts any status, so add checks.
+- `check` can hold `status` (`200` or `[200, 201]`), `body_contains`
+  (text or a list; placeholders allowed), `json` (`{"status": "paid",
+  "items[0].qty": 1}`: paths that must equal these values) and
+  `max_latency` (`"500ms"`). A failed check or an empty capture aborts the
+  rest of that iteration unless the step has `"on_fail": "continue"`. A
+  step with no `check` accepts any status and any body, so add checks; a
+  200 with an error body only fails on a body check.
+- `data.mode`: `unique` (default; user n keeps row n, needs a row per
+  user), `sequential` (rows in order per setup and per iteration, shared,
+  wrapping) or `random` (random row per setup and iteration, seeded).
 - Unknown keys are errors (exit 2, with line and column).
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
@@ -460,8 +467,7 @@ separate host.
 
 - Single-URL mode sends one fixed request; use `pelt run` for journeys,
   cookies and per-request variation.
-- Flow mode has no target-rate mode or rate stages, branches or loops yet, and
-  checks only look at the status code. For journeys that need real code, use
+- Flow mode has no target-rate mode or rate stages, branches or loops yet. For journeys that need real code, use
   a scripted tool such as Locust or k6.
 - Closed loop: a worker waits for each response before sending the next, so
   a stalling server gets fewer requests (coordinated omission) and tail

@@ -241,7 +241,7 @@ func (r *FlowReport) WriteText(w io.Writer) error {
 			s.Requests, s.ErrorCount(), s.CheckFails,
 			pct(sm, 0), pct(sm, 1), pct(sm, 2), pct(sm, 3), maxS)
 	}
-	b.WriteString("  (times in ms; failed = status check or capture failed)\n")
+	b.WriteString("  (times in ms; failed = a check or capture failed)\n")
 
 	var abortLines []string
 	for i := range res.Steps {

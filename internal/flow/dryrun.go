@@ -39,6 +39,7 @@ func DryRun(ctx context.Context, sc *Scenario, opts Options, w io.Writer) bool {
 	if len(sc.Setup) > 0 {
 		fmt.Fprintf(w, "\nsetup\n")
 		v.saveTo = v.setupVars
+		v.drawRow()
 		if out, _ := v.runSteps(ctx, ctx, sc.Setup, false); out != finished {
 			fmt.Fprintf(w, "\nSetup did not finish, so the flows were not run.\n")
 			return false
@@ -85,11 +86,16 @@ func writeTrace(w io.Writer, t *StepTrace) {
 	if len(t.RespBody) > 0 {
 		fmt.Fprintf(w, "    response %s\n", clip(string(t.RespBody), dryBodyMax))
 	}
+	var what []string
 	if len(t.Step.Status) > 0 {
+		what = append(what, "status "+statusWant(t.Step.Status))
+	}
+	what = append(what, t.Step.Checks.describe()...)
+	if len(what) > 0 {
 		if t.CheckErr != nil {
 			fmt.Fprintf(w, "    check FAILED: %v\n", t.CheckErr)
 		} else {
-			fmt.Fprintf(w, "    check ok: status %s\n", statusWant(t.Step.Status))
+			fmt.Fprintf(w, "    check ok: %s\n", strings.Join(what, ", "))
 		}
 	}
 	for _, c := range t.Captures {

@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -26,7 +27,7 @@ type vu struct {
 	client *http.Client
 	rng    *rand.Rand
 
-	row       map[string]string // this user's data row
+	row       map[string]string // this user's data row now; see drawRow
 	setupVars map[string]string // captured in setup; live for the whole run
 	iterVars  map[string]string // captured in the current iteration
 	saveTo    map[string]string // where captures go right now
@@ -43,7 +44,6 @@ func (r *Runner) newVU(id int, rec *recorder) *vu {
 		id:        id,
 		rec:       rec,
 		rng:       rand.New(rand.NewPCG(r.opts.Seed, uint64(id))),
-		row:       r.sc.Data.row(id),
 		setupVars: map[string]string{},
 		iterVars:  map[string]string{},
 	}
@@ -194,6 +194,7 @@ func (v *vu) setup(reqCtx, stopCtx context.Context) bool {
 	if len(v.sc.Setup) == 0 {
 		return true
 	}
+	v.drawRow() // retries keep this row
 	for attempt := range setupAttempts {
 		if attempt > 0 && !sleepCtx(stopCtx, time.Duration(attempt)*v.r.setupBackoff) {
 			return false
@@ -216,6 +217,7 @@ func (v *vu) setup(reqCtx, stopCtx context.Context) bool {
 func (v *vu) runFlow(reqCtx, stopCtx context.Context, fl *Flow, think bool) outcome {
 	fr := &v.rec.flows[fl.ID]
 	fr.Started++
+	v.drawRow()
 	clear(v.iterVars)
 	v.saveTo = v.iterVars
 	start := time.Now()
@@ -374,11 +376,18 @@ func (v *vu) do(ctx context.Context, st *Step) *StepTrace {
 	}
 	sr.recordResponse(resp.StatusCode, t.Latency, finish, t.Bytes)
 
+	var fails []string
 	if len(st.Status) > 0 && !slices.Contains(st.Status, resp.StatusCode) {
-		t.CheckErr = fmt.Errorf("status %d, want %s", resp.StatusCode, statusWant(st.Status))
+		fails = append(fails, fmt.Sprintf("status %d, want %s", resp.StatusCode, statusWant(st.Status)))
+	}
+	r := &response{status: resp.StatusCode, header: resp.Header, body: t.RespBody}
+	if !st.Checks.empty() {
+		fails = append(fails, st.Checks.run(r, t.Latency, v)...)
+	}
+	if len(fails) > 0 {
+		t.CheckErr = errors.New(strings.Join(fails, "; "))
 	}
 	if len(st.Capt) > 0 {
-		r := &response{status: resp.StatusCode, header: resp.Header, body: t.RespBody}
 		for _, c := range st.Capt {
 			val, err := c.extract(r)
 			if err == nil {

@@ -111,7 +111,8 @@ before the run starts instead of being ignored.
           "capture": [ { "json": "order_id", "as": "order_id" } ],
           "think": "0s" },
         { "name": "order status", "url": "/orders/{{order_id}}",
-          "check": { "status": 200 } }
+          "check": { "status": 200,
+                     "json": { "order_id": "{{order_id}}", "status": "paid" } } }
       ]
     }
   ]
@@ -146,7 +147,7 @@ A step is one request.
 | `body` | A string body. |
 | `body_file` | Read the body from a file, relative to the scenario file. |
 | `json` | A JSON body, written inline. Sets `Content-Type: application/json` unless a header already does. |
-| `check` | `{"status": 200}` or `{"status": [200, 201]}`. |
+| `check` | What the response must look like: `status`, `body_contains`, `json` and `max_latency`; see [Checks and failures](#checks-and-failures). |
 | `capture` | Values to pull out of the response; see [Captures](#captures). |
 | `think` | Pause after this step, overriding `defaults.think`. |
 | `on_fail` | `abort` (default) or `continue`; see [Checks and failures](#checks-and-failures). |
@@ -201,8 +202,31 @@ header) counts as a failed check on that step.
 
 ## Checks and failures
 
-A step **fails** when its `check.status` does not match or one of its
-captures finds nothing. A failure is counted against the step, and by default
+A step's `check` can hold any of these. Each one that fails makes the step
+fail:
+
+| Key | Example | Passes when |
+|-----|---------|-------------|
+| `status` | `200` or `[200, 201]` | The status code is one of these. |
+| `body_contains` | `"paid"` or `["paid", "{{order_id}}"]` | The body contains each text. Placeholders are filled in first. |
+| `json` | `{"status": "paid", "items[0].qty": 1}` | Each [dot path](#captures) in a JSON body equals the value. Numbers compare by value (`1` equals `1.0`), and objects and arrays must match whole. A string with placeholders, like `"{{order_id}}"`, matches the value's text, so it matches `123` or `"123"`. |
+| `max_latency` | `"500ms"` | The response took no longer than this. |
+
+```json
+{ "name": "order status", "url": "/orders/{{order_id}}",
+  "check": { "status": 200,
+             "json": { "order_id": "{{order_id}}", "status": "paid" },
+             "max_latency": "300ms" } }
+```
+
+A 200 with the wrong body is still a 200, so a body check catches what a
+status check misses: an error page served with 200, an empty list, or
+another user's order. Use `max_latency` for a hard limit on single
+responses; for a limit on the share of slow responses, use a `p95`
+[threshold](#thresholds) instead.
+
+A step **fails** when one of its checks fails or one of its captures finds
+nothing. A failure is counted against the step, and by default
 the rest of that iteration is skipped and the user starts the next one, so a
 checkout never runs with an empty cart id. `"on_fail": "continue"` on a step
 keeps going instead; later placeholders that depended on a failed capture
@@ -311,10 +335,19 @@ user001,pass001
 user002,pass002
 ```
 
-The first row names the columns, which become variables. In `unique` mode
-(the only mode for now) user *n* gets row *n*, so each user logs in as a
-different account. The run refuses to start if there are fewer rows than
-users. The path is relative to the scenario file.
+The first row names the columns, which become variables. The path is
+relative to the scenario file. `mode` says how users get rows:
+
+| Mode | Who gets which row |
+|------|--------------------|
+| `unique` (default) | User *n* gets row *n* and keeps it for the whole run, so each user logs in as a different account. The run refuses to start if there are fewer rows than users. |
+| `sequential` | Rows are handed out in file order, one for each setup and each iteration, shared across all users; after the last row it starts again at the first. Any number of users can share a few rows. |
+| `random` | Each setup and each iteration gets a random row, from the user's random source, so `-seed` repeats the same picks. |
+
+In `sequential` and `random` modes a user's row changes every iteration,
+while what setup captured (a login token, say) stays. So use them for
+values that vary per request, such as search terms or product ids, and use
+`unique` when the row must match the user who logged in.
 
 ## How the users run
 
@@ -471,7 +504,7 @@ checkout / list products      229       0       0      6.911      9.933     10.7
 checkout / add to cart        224       0       2      6.466     10.050     10.643     10.966     10.974
 checkout / checkout           218       0       0      6.882      9.977     10.584     11.006     11.115
 checkout / order status       218       0       0      6.598      9.873     10.359     10.800     10.898
-  (times in ms; failed = status check or capture failed)
+  (times in ms; failed = a check or capture failed)
 
 Aborted at step:
        1  browse / list products
@@ -644,8 +677,6 @@ paste its output anywhere public.
 
 Planned for later versions, roughly in this order:
 
-- `sequential` and `random` data modes, and checks on the body
-  (`body_contains`, JSON field equals, max latency).
 - A target-rate (open) model, `-rate` iterations per second, counting
   iterations dropped when no user is free, and rate stages in flow mode;
   stopping a run early when a threshold is clearly missed; per-step

@@ -83,7 +83,7 @@ func (o *Options) validate(sc *Scenario) error {
 	if o.Timeout < 0 {
 		return errors.New("timeout must be positive")
 	}
-	if sc.Data != nil && len(sc.Data.Rows) < o.Users {
+	if sc.Data != nil && sc.Data.Mode == DataUnique && len(sc.Data.Rows) < o.Users {
 		if o.Stages != nil {
 			return fmt.Errorf("data file has %d rows but the stages reach %d users, who need one each (mode unique)", len(sc.Data.Rows), o.Users)
 		}
@@ -114,6 +114,7 @@ type Runner struct {
 	active      atomic.Int64 // users running: started and not gone
 	connsNew    atomic.Int64
 	connsReused atomic.Int64
+	dataNext    atomic.Int64 // next row in sequential data mode
 
 	// series counts per second; nil in a dry run.
 	series atomic.Pointer[series.Counters]
