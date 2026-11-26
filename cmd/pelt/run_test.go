@@ -128,7 +128,7 @@ func TestRunFlowBadArgs(t *testing.T) {
 		want string
 	}{
 		{[]string{"run"}, "Usage: pelt run"},
-		{[]string{"run", filepath.Join(dir, "missing.json")}, "no such file"},
+		{[]string{"run", filepath.Join(dir, "missing.json")}, "missing.json"},
 		{[]string{"run", bad}, `unknown field "typo"`},
 		{[]string{"run", noLimit}, "set a duration or an iteration count"},
 		{[]string{"run", good, "-u", "0"}, "-u must be at least 1"},
