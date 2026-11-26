@@ -429,6 +429,7 @@ Flags may go before or after the file name.
 | `-series` | none | Also write one row per second of the run to this CSV file. See [Per-second results](#per-second-results). |
 | `-quiet` | false | Hide the live progress line (iterations so far, iterations and requests in the last whole second, failed checks). |
 | `-http2` | false | Allow HTTP/2 over TLS. |
+| `-insecure`, `-cacert`, `-cert`, `-key`, `-proxy` | | TLS and proxy options, as in [single-URL mode](usage.md#tls-and-proxies). |
 | `-dry-run` | false | Run setup and each flow once as one user and print everything. |
 | `-threshold` | none | A pass/fail target such as `p95<500ms` or `checkout/pay: errors<1%`. Repeatable; added to the file's. See [Thresholds](#thresholds). |
 | `-no-thresholds` | false | Skip the file's thresholds. `-threshold` flags still apply. |

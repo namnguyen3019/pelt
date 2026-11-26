@@ -46,6 +46,7 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		showVer  = fs.Bool("version", false, "print the version and exit")
 		cliTs    thresholdFlag
 	)
+	network := networkFlags(fs)
 	fs.Var(&cliTs, "threshold", "pass/fail target, e.g. 'p95<500ms' or 'checkout/pay: errors<1%' (repeatable; added to the file's)")
 
 	// Accept flags on either side of the file name: pelt run shop.json -u 50.
@@ -124,6 +125,10 @@ func runFlow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	opts.HTTP2 = *http2
+	if opts.TLS, opts.Proxy, err = network.Build(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
+	}
 	opts.Seed = *seed
 	if !set["seed"] {
 		opts.Seed = randomSeed()

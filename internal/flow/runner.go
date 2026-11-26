@@ -2,11 +2,13 @@ package flow
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +27,8 @@ type Options struct {
 	Timeout    time.Duration // per request, including reading the body
 	Seed       uint64        // seeds each user's random source: flow picks, think, $rand
 	HTTP2      bool
+	TLS        *tls.Config // nil for Go's defaults; see loadtest.Network
+	Proxy      *url.URL    // nil to use HTTPS_PROXY and HTTP_PROXY
 	// Stages move the number of users over the run and set its length, so
 	// Duration must be 0. Users becomes their highest target.
 	Stages *stages.Plan
@@ -139,6 +143,8 @@ func New(sc *Scenario, opts Options) (*Runner, error) {
 		Concurrency: opts.Users,
 		Timeout:     opts.Timeout,
 		HTTP2:       opts.HTTP2,
+		TLS:         opts.TLS,
+		Proxy:       opts.Proxy,
 	})
 	r.trace = &httptrace.ClientTrace{
 		ConnectDone: func(_, _ string, err error) {

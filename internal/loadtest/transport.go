@@ -22,6 +22,12 @@ import (
 // warm keep-alive connection for the whole run.
 func newTransport(cfg Config) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.TLS != nil {
+		t.TLSClientConfig = cfg.TLS.Clone()
+	}
+	if cfg.Proxy != nil {
+		t.Proxy = http.ProxyURL(cfg.Proxy)
+	}
 
 	if cfg.Untuned {
 		t.MaxIdleConnsPerHost = 0 // 0 means http.DefaultMaxIdleConnsPerHost (2)
@@ -54,5 +60,6 @@ func newTransport(cfg Config) *http.Transport {
 
 // NewTransport returns the tuned transport for cfg, sized to
 // cfg.Concurrency, for other packages (flow mode) that drive their own
-// clients. Only Concurrency, Timeout, HTTP2 and Untuned are used.
+// clients. Only Concurrency, Timeout, HTTP2, Untuned, TLS and Proxy are
+// used.
 func NewTransport(cfg Config) *http.Transport { return newTransport(cfg) }

@@ -89,6 +89,10 @@ The URL must start with `http://` or `https://`. Flags go before the URL.
 | `-ramp` | | Ramp concurrency from 0 to `-c` over this long, then hold for the rest of `-d`. |
 | `-series` | | Also write one row per second to this CSV file. |
 | `-http2` | false | Allow HTTP/2 over TLS (default forces HTTP/1.1). |
+| `-insecure` | false | Skip verifying the server's TLS certificate (self-signed staging). Only on the user's say-so. |
+| `-cacert` | | PEM CA file to trust on top of the system's. Prefer it to `-insecure`. |
+| `-cert`, `-key` | | PEM client certificate and key (mutual TLS). |
+| `-proxy` | | Proxy URL (`http://`, `https://`, `socks5://`). Default: `HTTPS_PROXY`/`HTTP_PROXY`. |
 | `-untuned` | false | Go's stock connection pool, for comparison only. |
 | `-quiet` | false | Hide the live progress line. |
 | `-threshold` | | Pass/fail target, e.g. `'p95<300ms'`, `'errors<1%'`. Repeatable. Missed = exit 3. See [Thresholds](#thresholds-passfail). |
@@ -269,7 +273,8 @@ A minimal scenario:
 
 Flags override the file's `load` block: `-u` users, `-d` duration, `-i`
 total iterations, `-t` timeout, `-stages`, `-ramp`, `-base` base URL,
-`-seed`, `-o json`, `-series out.csv`, `-quiet`, `-http2`, `-dry-run`, plus
+`-seed`, `-o json`, `-series out.csv`, `-quiet`, `-http2`, `-dry-run`, the TLS and
+proxy flags (`-insecure`, `-cacert`, `-cert`, `-key`, `-proxy`), plus
 `-threshold` (repeatable) and `-no-thresholds`. They may go before or after
 the file.
 

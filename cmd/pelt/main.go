@@ -144,6 +144,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		quiet      = fs.Bool("quiet", false, "hide the live progress line")
 		showVer    = fs.Bool("version", false, "print the version and exit")
 	)
+	network := networkFlags(fs)
 	fs.Var(&headers, "H", "request header 'Name: value' (repeatable)")
 	fs.Var(&thresholds, "threshold", "pass/fail target such as 'p95<300ms', 'errors<1%' or 'rps>500' (repeatable); exit 3 if missed")
 
@@ -204,6 +205,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		payload = []byte(*body)
 	}
 
+	tlsConf, proxy, err := network.Build()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return exitUsage
+	}
+
 	seriesFile, err := createSeries(*seriesOut)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -223,6 +230,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		RateLimit:   *rate,
 		HTTP2:       *http2,
 		Untuned:     *untuned,
+		TLS:         tlsConf,
+		Proxy:       proxy,
 		Stages:      plan,
 	})
 	if err != nil {
