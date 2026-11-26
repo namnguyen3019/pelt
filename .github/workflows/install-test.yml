@@ -1,14 +1,20 @@
 # Runs install.ps1 on a real Windows machine against a published release,
 # in both PowerShell 7 (pwsh) and Windows PowerShell 5.1, then checks that
 # the installed pelt.exe works and that a bad checksum is refused.
+#
+# It runs after every release build, against the latest release; when
+# install.ps1 changes; or by hand from the Actions tab with any version.
 name: install-test
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release to install
-        default: v0.1.0
+        description: Release to install, e.g. v0.4.2 (empty for the latest)
+        default: ""
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   push:
     branches: [main]
     paths:
@@ -20,6 +26,7 @@ permissions:
 
 jobs:
   windows:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +36,7 @@ jobs:
       run:
         shell: ${{ matrix.shell }}
     env:
-      PELT_VERSION: ${{ inputs.version || 'v0.1.0' }}
+      PELT_VERSION: ${{ inputs.version || 'latest' }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,6 +55,9 @@ jobs:
           if (($userPath -split ';') -notcontains $dir) { throw "user PATH does not contain $dir" }
           & $exe -h
           if ($LASTEXITCODE -ne 0) { throw "pelt -h exited with $LASTEXITCODE" }
+          & $exe -version
+          if ($LASTEXITCODE -ne 0) { 'This build has no -version flag (v0.4.2 or older).' }
+          $global:LASTEXITCODE = 0
 
       - name: Set up Go (for Pelt's local test server)
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -80,7 +90,11 @@ jobs:
         run: |
           $mirror = Join-Path $env:RUNNER_TEMP 'mirror'
           New-Item -ItemType Directory -Force -Path $mirror | Out-Null
-          $base = "https://github.com/namnguyen3019/pelt/releases/download/$env:PELT_VERSION"
+          $base = if ($env:PELT_VERSION -eq 'latest') {
+            'https://github.com/namnguyen3019/pelt/releases/latest/download'
+          } else {
+            "https://github.com/namnguyen3019/pelt/releases/download/$env:PELT_VERSION"
+          }
           Invoke-WebRequest -UseBasicParsing "$base/pelt_windows_amd64.zip" -OutFile "$mirror\pelt_windows_amd64.zip"
           Set-Content -Path "$mirror\checksums.txt" -Value ('0' * 64 + '  pelt_windows_amd64.zip')
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8081', '--bind', '127.0.0.1', '--directory', $mirror -PassThru
