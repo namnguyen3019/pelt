@@ -96,12 +96,23 @@ sudo mv pelt /usr/local/bin/
 
 ## Releasing
 
-Pushing a tag that starts with `v` runs
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-tests, builds all six targets and publishes a GitHub Release with the archives
-and `checksums.txt`:
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) tests,
+builds all six targets with the version stamped in (`pelt -version`), and
+attaches the archives and `checksums.txt` to the release. Either way of
+releasing works:
 
-```sh
-git tag v0.5.0
-git push origin v0.5.0
-```
+- **On GitHub:** Releases, Draft a new release, pick or create a tag such as
+  `v0.5.0`, and Publish. Your title and notes stay; the files appear a few
+  minutes later.
+- **From a terminal:** push a tag, and the workflow creates the release
+  with generated notes:
+
+  ```sh
+  git tag v0.5.0
+  git push origin v0.5.0
+  ```
+
+To fill in a release that has no files (v0.2.0 and v0.4.0 were published
+before the workflow handled web releases), open Actions, pick **release**,
+**Run workflow**, and enter the tag. It builds the code at that tag and
+uploads to the existing release, replacing any files of the same name.

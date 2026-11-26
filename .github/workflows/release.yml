@@ -1,26 +1,59 @@
-# Builds pelt for every supported OS and CPU and publishes a GitHub Release
-# whenever a version tag is pushed:
+# Builds pelt for every supported OS and CPU and attaches the archives to a
+# GitHub Release. Any of these starts it:
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   - publishing a release on GitHub's Releases page (new or existing tag)
+#   - pushing a version tag: git tag v0.5.0 && git push origin v0.5.0
+#   - running it by hand from the Actions tab with a tag, to fill in a
+#     release that has no files (it builds the code at that tag)
+#
+# If the release already exists, its title and notes are left alone and the
+# archives are uploaded to it, replacing files of the same name. Otherwise
+# a release is created with generated notes.
 #
 # Assets: pelt_<os>_<arch>.tar.gz (linux, darwin), pelt_windows_<arch>.zip,
-# and checksums.txt with a SHA-256 line for each archive.
+# and checksums.txt with a SHA-256 line for each archive. The binaries are
+# stamped with the tag, so `pelt -version` prints it.
 name: release
 
 on:
   push:
     tags:
       - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and upload, e.g. v0.4.0
+        required: true
 
 permissions:
   contents: write
 
+# Publishing a release with a new tag on the web page fires both the tag
+# push and the release event. Runs for the same tag queue up instead of
+# racing; the second one just uploads the same files again.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
     steps:
-      - name: Check out
+      - name: Check the tag
+        run: |
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::'$TAG' is not a version tag like v0.5.0"; exit 1 ;;
+          esac
+
+      - name: Check out the tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -31,8 +64,6 @@ jobs:
         run: go test -race ./...
 
       - name: Build archives
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           set -eu
           mkdir -p dist
@@ -43,9 +74,9 @@ jobs:
             stage=$(mktemp -d)
             bin=pelt
             [ "$os" = windows ] && bin=pelt.exe
-            echo "Building $name ($VERSION)"
+            echo "Building $name ($TAG)"
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
-              go build -trimpath -ldflags "-s -w" -o "$stage/$bin" ./cmd/pelt
+              go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o "$stage/$bin" ./cmd/pelt
             cp README.md "$stage/"
             if [ "$os" = windows ]; then
               (cd "$stage" && zip -q -X "$GITHUB_WORKSPACE/dist/$name.zip" "$bin" README.md)
@@ -57,13 +88,39 @@ jobs:
           (cd dist && sha256sum pelt_* > checksums.txt)
           cat dist/checksums.txt
 
-      - name: Publish release
+      - name: Check the version stamp
+        run: |
+          tar -xzOf dist/pelt_linux_amd64.tar.gz pelt > pelt-check
+          chmod +x pelt-check
+          # Tags made before -version existed (v0.4.2 and older) have no
+          # flag to check.
+          help=$(./pelt-check -h 2>&1 || true)
+          case "$help" in
+            *-version*)
+              got=$(./pelt-check -version)
+              echo "$got"
+              case "$got" in
+                "pelt $TAG "*) ;;
+                *) echo "::error::binary is not stamped with $TAG"; exit 1 ;;
+              esac
+              ;;
+            *) echo "$TAG has no -version flag; skipping the check" ;;
+          esac
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ github.ref_name }}
         run: |
-          gh release create "$VERSION" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$VERSION" \
-            --generate-notes \
-            --verify-tag
+          set -eu
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG exists; uploading the archives to it"
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
