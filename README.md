@@ -58,8 +58,13 @@ To fail a CI job when the service misses its targets, add thresholds. The run
 exits 3 if any is missed:
 
 ```sh
-pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' https://staging.example.com/
+pelt -d 30s -c 100 -threshold 'p95<300ms' -threshold 'errors<1%' \
+  -threshold 'status:5xx<1%' https://staging.example.com/
 ```
+
+`errors` counts requests that got no response (timeouts, refused
+connections); a 500 is a response, so `status:5xx` is what catches server
+errors.
 
 Metrics and output: [docs/usage.md#thresholds](docs/usage.md#thresholds). Flow
 files take per-flow and per-step targets too: [docs/flows.md#thresholds](docs/flows.md#thresholds).
