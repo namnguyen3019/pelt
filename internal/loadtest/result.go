@@ -121,16 +121,16 @@ func ClassifyError(err error) string {
 		errors.Is(err, os.ErrDeadlineExceeded),
 		errors.As(err, &netErr) && netErr.Timeout():
 		return "timeout"
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case isAny(err, errConnRefused):
 		return "connection refused"
-	case errors.Is(err, syscall.ECONNRESET),
+	case isAny(err, errConnReset),
 		errors.Is(err, syscall.EPIPE),
 		errors.Is(err, io.EOF),
 		errors.Is(err, io.ErrUnexpectedEOF):
 		return "connection reset"
-	case errors.Is(err, syscall.EADDRNOTAVAIL):
+	case isAny(err, errAddrNotAvail):
 		return "out of local ports"
-	case errors.Is(err, syscall.EMFILE), errors.Is(err, syscall.ENFILE):
+	case isAny(err, errTooManyOpen):
 		return "too many open files"
 	case errors.As(err, &dnsErr):
 		return "dns lookup failed"
@@ -139,6 +139,16 @@ func ClassifyError(err error) string {
 	default:
 		return "other: " + rootMessage(err)
 	}
+}
+
+// isAny reports whether err matches any of targets.
+func isAny(err error, targets []error) bool {
+	for _, t := range targets {
+		if errors.Is(err, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // rootMessage returns the innermost error message, trimmed, so that
